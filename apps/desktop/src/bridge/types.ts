@@ -145,8 +145,16 @@ export interface HostSnapshot {
 export interface GuestAccess {
   sshHost: string;
   sshPort: number;
+  /** Empty when the login is chosen during an OS installation. */
   user: string;
   password: string | null;
+  /** Windows guest: sign in over Remote Desktop, there is no SSH server by default. */
+  windows?: boolean;
+  /** Remote Desktop endpoint, `host:port`. */
+  rdp?: string;
+  /** The guest's screen, `vnc://host:port`, for guests installed from an ISO. */
+  display?: string;
+  displayPassword?: string;
 }
 
 export interface CatalogImage {
@@ -154,15 +162,25 @@ export interface CatalogImage {
   title: string;
 }
 
+export interface IsoInfo {
+  label: string;
+  windows: boolean;
+  arch: "x86_64" | "aarch64" | null;
+}
+
 export interface LocalImage {
   name: string;
   sizeBytes: number;
+  kind: "disk" | "iso";
+  iso?: IsoInfo;
 }
 
 export interface Download {
   done: number;
   total: number | null;
   error: string | null;
+  /** A local file being copied in rather than downloaded. */
+  import?: boolean;
 }
 
 export interface Images {

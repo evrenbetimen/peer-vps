@@ -8,6 +8,13 @@
 //! keys. Networking is QEMU user mode with SSH forwarded to a loopback port,
 //! so no root, bridge or tap device is needed on any OS.
 //!
+//! An installer ISO (a Windows ISO included) boots with a blank disk and its
+//! screen on a password-protected loopback VNC port. Windows guests get
+//! devices with in-box drivers (NVMe disk, e1000e NIC on x86), UEFI on x86
+//! when OVMF is installed, Remote Desktop forwarded to a loopback port, and an
+//! answer file ([`unattend`]) that skips Windows 11's TPM/Secure Boot checks
+//! and creates the node's login user.
+//!
 //! | trait method | QEMU                                                              |
 //! |--------------|-------------------------------------------------------------------|
 //! | `create`     | `qemu-img create` overlay, start the seed server, spawn `qemu -S`  |
@@ -20,6 +27,7 @@
 
 pub mod qmp;
 pub mod seed;
+pub mod unattend;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -39,12 +47,18 @@ use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 
 use super::affinity::pin;
-use super::{GuestAccess, Hypervisor, Placement, VmId, VmSnapshot, VmSpec, images};
+use super::images::{self, ImageKind};
+use super::{GuestAccess, Hypervisor, Placement, VmId, VmSnapshot, VmSpec};
 use crate::{Error, Result};
 use qmp::Qmp;
 
 const SNAPSHOT_MAGIC: &[u8; 8] = b"PVQMSNP1";
 const DEFAULT_USER: &str = "peervps";
+/// Minimums for a Windows guest (Windows 11 needs 4 GiB; Setup alone fills ~20 GiB).
+const WINDOWS_MIN_MEM_MIB: u64 = 4096;
+const WINDOWS_MIN_DISK_GIB: u64 = 32;
+/// virtio-win driver disc, attached to Windows guests when present in the image directory.
+pub const VIRTIO_WIN_IMAGE: &str = "virtio-win";
 
 /// Hardware acceleration QEMU runs guests with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +124,21 @@ impl Arch {
             Self::Aarch64 => "qemu-system-aarch64",
         }
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::Aarch64 => "aarch64",
+        }
+    }
+}
+
+/// x86 UEFI firmware (OVMF): read-only code plus a template for each VM's variable store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Uefi {
+    pub code: PathBuf,
+    pub vars: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +150,9 @@ pub struct QemuConfig {
     pub accel: Accel,
     /// UEFI firmware; required for aarch64 guests (`edk2-aarch64-code.fd`).
     pub firmware: Option<PathBuf>,
+    /// x86 UEFI (OVMF) for Windows installs; they fall back to BIOS without it.
+    #[serde(default)]
+    pub uefi: Option<Uefi>,
     /// Directory of `<image>.qcow2` base disks.
     pub images_dir: PathBuf,
     /// Per-VM disks, logs and snapshots live in `<run_dir>/<vm>/`.
@@ -150,12 +182,17 @@ impl QemuConfig {
                 Error::NotFound("edk2-aarch64-code.fd (UEFI firmware) not found in QEMU's share directory".into())
             })?),
         };
+        let uefi = match arch {
+            Arch::X86_64 => find_ovmf(&binary),
+            Arch::Aarch64 => None,
+        };
         Ok(Self {
             binary,
             img_binary,
             arch,
             accel: Accel::detect(),
             firmware,
+            uefi,
             images_dir,
             run_dir,
             user: DEFAULT_USER.into(),
@@ -173,6 +210,29 @@ struct Launch {
     image: String,
     ssh_port: u16,
     password: String,
+    /// Set for guests booted from an installer ISO.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    installer: Option<Installer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Installer {
+    iso: PathBuf,
+    windows: bool,
+    /// Loopback TCP port of the guest's screen.
+    vnc_port: u16,
+    /// Loopback port forwarded to the guest's Remote Desktop (Windows).
+    rdp_port: Option<u16>,
+    /// virtio-win driver disc, if one is installed.
+    drivers: Option<PathBuf>,
+}
+
+impl Installer {
+    /// VNC's own password is limited to 8 characters.
+    fn vnc_password(password: &str) -> &str {
+        &password[..password.len().min(8)]
+    }
 }
 
 struct Vm {
@@ -181,6 +241,8 @@ struct Vm {
     dir: PathBuf,
     launch: Launch,
     seed: Option<AbortHandle>,
+    /// Press a key at the installer's "Press any key to boot from CD" prompt on first start.
+    boot_keys: bool,
 }
 
 pub struct QemuHypervisor {
@@ -233,6 +295,7 @@ impl QemuHypervisor {
             dir: dir.to_owned(),
             launch: launch.clone(),
             seed: None,
+            boot_keys: false,
         };
         if let Some(pid) = vm.child.id() {
             pin(pid, cores);
@@ -241,7 +304,69 @@ impl QemuHypervisor {
             kill(&mut vm).await;
             return Err(e);
         }
+        if launch.installer.is_some() {
+            let password = Installer::vnc_password(&launch.password);
+            if let Err(e) =
+                vm.qmp.execute("set_password", Some(json!({ "protocol": "vnc", "password": password }))).await
+            {
+                kill(&mut vm).await;
+                return Err(e);
+            }
+        }
         Ok(vm)
+    }
+
+    /// Blank disk plus everything an installer ISO boots with.
+    async fn prepare_installer(
+        &self,
+        dir: &Path,
+        iso: &Path,
+        spec: &VmSpec,
+        placement: &Placement,
+    ) -> Result<Installer> {
+        let info = images::iso_info(iso, &spec.image)?;
+        if let Some(arch) = info.arch
+            && arch != self.cfg.arch.as_str()
+        {
+            let hint = match (info.windows, self.cfg.arch) {
+                (true, Arch::Aarch64) => {
+                    "; use the Windows 11 ARM64 ISO (microsoft.com/software-download/windows11arm64)"
+                }
+                (true, Arch::X86_64) => "; use the x64 Windows ISO",
+                _ => "",
+            };
+            return Err(Error::Unsupported(format!(
+                "{} is an {arch} installer but this host runs {} guests{hint}",
+                spec.image,
+                self.cfg.arch.as_str()
+            )));
+        }
+        if info.windows && placement.mem_mib < WINDOWS_MIN_MEM_MIB {
+            return Err(Error::Invalid(format!("Windows needs at least {WINDOWS_MIN_MEM_MIB} MiB of memory")));
+        }
+        if info.windows && placement.disk_gib < WINDOWS_MIN_DISK_GIB {
+            return Err(Error::Invalid(format!("Windows needs a disk of at least {WINDOWS_MIN_DISK_GIB} GiB")));
+        }
+        let size = format!("{}G", placement.disk_gib.max(1));
+        let disk = dir.join("disk.qcow2");
+        self.qemu_img(&["create".as_ref(), "-f".as_ref(), "qcow2".as_ref(), disk.as_os_str(), size.as_ref()]).await?;
+        let mut installer = Installer {
+            iso: iso.to_owned(),
+            windows: info.windows,
+            vnc_port: free_vnc_port()?,
+            rdp_port: None,
+            drivers: None,
+        };
+        if info.windows {
+            installer.rdp_port = Some(free_port()?);
+            installer.drivers = Some(images::iso_path(&self.cfg.images_dir, VIRTIO_WIN_IMAGE)).filter(|p| p.is_file());
+            if self.cfg.arch == Arch::X86_64
+                && let Some(uefi) = &self.cfg.uefi
+            {
+                tokio::fs::copy(&uefi.vars, dir.join("efivars.fd")).await?;
+            }
+        }
+        Ok(installer)
     }
 
     async fn with_vm<T>(&self, id: VmId, f: impl FnOnce(&Vm) -> T) -> Result<T> {
@@ -330,21 +455,37 @@ impl Hypervisor for QemuHypervisor {
         if spec.accelerator.is_some() {
             return Err(Error::Unsupported("GPU/NPU passthrough is not wired into the QEMU backend yet".into()));
         }
-        let base = images::resolve(&self.cfg.images_dir, &spec.image)?;
+        let image = images::resolve(&self.cfg.images_dir, &spec.image)?;
         let dir = self.vm_dir(id);
         tokio::fs::create_dir_all(&dir).await?;
+        let hostname = format!("pv-{}", &id.0.simple().to_string()[..8]);
         let setup = async {
-            self.create_overlay(&base, &dir.join("disk.qcow2"), placement.disk_gib).await?;
-            let launch = Launch {
+            let mut launch = Launch {
                 vcpus: spec.vcpus,
                 mem_mib: placement.mem_mib,
                 image: spec.image.clone(),
                 ssh_port: free_port()?,
                 password: password(),
+                installer: None,
             };
+            if image.kind == ImageKind::Iso {
+                let installer = self.prepare_installer(&dir, &image.path, spec, placement).await?;
+                if installer.windows {
+                    let answers = unattend::autounattend(self.cfg.arch, &hostname, &self.cfg.user, &launch.password);
+                    tokio::fs::create_dir_all(dir.join("unattend")).await?;
+                    tokio::fs::write(dir.join("unattend/autounattend.xml"), answers).await?;
+                }
+                launch.installer = Some(installer);
+                let mut vm = self
+                    .spawn(&dir, &launch, &placement.pinned_cores, Extra { seed_url: None, incoming: false })
+                    .await?;
+                vm.boot_keys = true;
+                return Ok(vm);
+            }
+            self.create_overlay(&image.path, &dir.join("disk.qcow2"), placement.disk_gib).await?;
             let (url, seed) = seed::serve(seed::Seed {
                 instance_id: id.to_string(),
-                hostname: format!("pv-{}", &id.0.simple().to_string()[..8]),
+                hostname: hostname.clone(),
                 user: self.cfg.user.clone(),
                 password: launch.password.clone(),
                 ssh_keys: self.cfg.ssh_keys.clone(),
@@ -377,7 +518,27 @@ impl Hypervisor for QemuHypervisor {
     }
 
     async fn start(&self, id: VmId) -> Result<()> {
-        self.qmp(id, "cont", None).await.map(drop)
+        let (qmp, boot_keys) = {
+            let mut vms = self.vms.lock().await;
+            let vm = vms.get_mut(&id).ok_or_else(|| Error::NotFound(format!("vm {id}")))?;
+            (vm.qmp.clone(), std::mem::take(&mut vm.boot_keys))
+        };
+        qmp.execute("cont", None).await?;
+        if boot_keys {
+            // Installer discs wait a few seconds for a key before falling through
+            // to the (still empty) disk; nobody has the screen open that early.
+            let window = if self.cfg.accel == Accel::Tcg { 30 } else { 12 };
+            tokio::spawn(async move {
+                for _ in 0..window * 2 {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let key = json!({ "keys": [{ "type": "qcode", "data": "spc" }] });
+                    if qmp.execute("send-key", Some(key)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Ok(())
     }
 
     async fn pause(&self, id: VmId) -> Result<()> {
@@ -390,6 +551,12 @@ impl Hypervisor for QemuHypervisor {
 
     async fn snapshot(&self, id: VmId) -> Result<VmSnapshot> {
         let (dir, launch) = self.with_vm(id, |vm| (vm.dir.clone(), vm.launch.clone())).await?;
+        if launch.installer.is_some() {
+            // Their disk is a full image, not a small overlay over a shared base.
+            return Err(Error::Unsupported(
+                "scale to zero is not supported for guests installed from an ISO yet".into(),
+            ));
+        }
         let state = dir.join("state.bin");
         self.qmp(id, "migrate", Some(json!({ "uri": format!("file:{}", state.display()) }))).await?;
         self.wait_migration(id).await?;
@@ -403,7 +570,7 @@ impl Hypervisor for QemuHypervisor {
     async fn restore(&self, snapshot: VmSnapshot, placement: &Placement) -> Result<()> {
         let id = snapshot.vm;
         let (mut launch, state_bytes, disk) = unpack_snapshot(&snapshot.bytes)?;
-        let base = images::resolve(&self.cfg.images_dir, &launch.image)?;
+        let base = images::resolve(&self.cfg.images_dir, &launch.image)?.path;
         if let Some(mut old) = self.vms.lock().await.remove(&id) {
             kill(&mut old).await;
         }
@@ -461,11 +628,18 @@ impl Hypervisor for QemuHypervisor {
 
     async fn access(&self, id: VmId) -> Result<Option<GuestAccess>> {
         let launch = self.with_vm(id, |vm| vm.launch.clone()).await?;
+        let installer = launch.installer.as_ref();
+        // A Linux installer asks for its own user; cloud images and Windows get ours.
+        let ours = installer.is_none_or(|i| i.windows);
         Ok(Some(GuestAccess {
             ssh_host: "127.0.0.1".into(),
             ssh_port: launch.ssh_port,
-            user: self.cfg.user.clone(),
-            password: Some(launch.password),
+            user: if ours { self.cfg.user.clone() } else { String::new() },
+            password: ours.then(|| launch.password.clone()),
+            windows: installer.is_some_and(|i| i.windows),
+            rdp: installer.and_then(|i| i.rdp_port).map(|p| format!("127.0.0.1:{p}")),
+            display: installer.map(|i| format!("vnc://127.0.0.1:{}", i.vnc_port)),
+            display_password: installer.map(|_| Installer::vnc_password(&launch.password).to_owned()),
         }))
     }
 }
@@ -482,8 +656,13 @@ fn esc(p: &Path) -> String {
 
 fn command_line(cfg: &QemuConfig, dir: &Path, launch: &Launch, qmp_port: u16, extra: &Extra) -> Vec<OsString> {
     let (accel, cpu) = cfg.accel.args();
+    let installer = launch.installer.as_ref();
+    let windows = installer.is_some_and(|i| i.windows);
+    let x86 = cfg.arch == Arch::X86_64;
     let machine = match cfg.arch {
         Arch::X86_64 => "q35",
+        // Windows on Arm requires a GICv3.
+        Arch::Aarch64 if windows => "virt,gic-version=3",
         Arch::Aarch64 => "virt",
     };
     let mut a: Vec<String> = vec![
@@ -504,19 +683,91 @@ fn command_line(cfg: &QemuConfig, dir: &Path, launch: &Launch, qmp_port: u16, ex
         format!("file:{}", esc(&dir.join("console.log"))),
         "-qmp".into(),
         format!("tcp:127.0.0.1:{qmp_port},server=on,wait=off"),
-        "-drive".into(),
-        format!("if=virtio,file={},format=qcow2,discard=unmap", esc(&dir.join("disk.qcow2"))),
+    ];
+    let disk = esc(&dir.join("disk.qcow2"));
+    if windows {
+        // Windows has in-box NVMe drivers on x86 and Arm; it has none for virtio-blk.
+        a.extend([
+            "-drive".into(),
+            format!("if=none,id=disk0,file={disk},format=qcow2,discard=unmap"),
+            "-device".into(),
+            "nvme,drive=disk0,serial=peervps0,bootindex=1".into(),
+        ]);
+    } else {
+        a.extend(["-drive".into(), format!("if=virtio,file={disk},format=qcow2,discard=unmap")]);
+    }
+    let mut net = format!("user,id=n0,hostfwd=tcp:127.0.0.1:{}-:22", launch.ssh_port);
+    if let Some(rdp) = installer.and_then(|i| i.rdp_port) {
+        net.push_str(&format!(",hostfwd=tcp:127.0.0.1:{rdp}-:3389"));
+    }
+    // e1000e has an in-box Windows driver on x86; Windows on Arm needs virtio-win either way.
+    let nic = if windows && x86 { "e1000e" } else { "virtio-net-pci" };
+    a.extend([
         "-netdev".into(),
-        format!("user,id=n0,hostfwd=tcp:127.0.0.1:{}-:22", launch.ssh_port),
+        net,
         "-device".into(),
-        "virtio-net-pci,netdev=n0".into(),
+        format!("{nic},netdev=n0"),
         // Cloud images generate SSH host keys on first boot; give them entropy.
         "-device".into(),
         "virtio-rng-pci".into(),
         "-S".into(),
-    ];
+    ]);
+    if let Some(i) = installer {
+        // A screen, keyboard and pointer for the installer, on a loopback VNC port.
+        let cdrom = |id: &str, bus: &str, boot: Option<u8>| {
+            let boot = boot.map(|b| format!(",bootindex={b}")).unwrap_or_default();
+            if x86 {
+                format!("ide-cd,drive={id},bus={bus}{boot}")
+            } else {
+                format!("usb-storage,drive={id},removable=on{boot}")
+            }
+        };
+        a.extend([
+            "-device".into(),
+            "qemu-xhci,id=xhci".into(),
+            "-device".into(),
+            "usb-kbd".into(),
+            "-device".into(),
+            "usb-tablet".into(),
+            "-device".into(),
+            if x86 { "VGA,vgamem_mb=64".into() } else { "ramfb".into() },
+            "-vnc".into(),
+            format!("127.0.0.1:{},password=on", i.vnc_port.saturating_sub(5900)),
+            "-drive".into(),
+            format!("if=none,id=cd0,media=cdrom,readonly=on,file={}", esc(&i.iso)),
+            "-device".into(),
+            cdrom("cd0", "ide.0", Some(0)),
+        ]);
+        if windows {
+            // autounattend.xml on a read-only USB stick; Setup reads it from any removable drive.
+            a.extend([
+                "-blockdev".into(),
+                format!(
+                    "driver=vvfat,node-name=unattend,dir={},label=PEERVPS,read-only=on",
+                    esc(&dir.join("unattend"))
+                ),
+                "-device".into(),
+                "usb-storage,drive=unattend,removable=on".into(),
+            ]);
+        }
+        if let Some(drivers) = &i.drivers {
+            a.extend([
+                "-drive".into(),
+                format!("if=none,id=cd1,media=cdrom,readonly=on,file={}", esc(drivers)),
+                "-device".into(),
+                cdrom("cd1", "ide.1", None),
+            ]);
+        }
+    }
     if let Some(fw) = &cfg.firmware {
         a.extend(["-bios".into(), esc(fw)]);
+    } else if windows && let Some(uefi) = &cfg.uefi {
+        a.extend([
+            "-drive".into(),
+            format!("if=pflash,format=raw,unit=0,readonly=on,file={}", esc(&uefi.code)),
+            "-drive".into(),
+            format!("if=pflash,format=raw,unit=1,file={}", esc(&dir.join("efivars.fd"))),
+        ]);
     }
     if let Some(url) = &extra.seed_url {
         a.extend(["-smbios".into(), format!("type=1,serial=ds=nocloud;s={url}")]);
@@ -557,6 +808,13 @@ fn free_port() -> Result<u16> {
     Ok(TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?.local_addr()?.port())
 }
 
+/// QEMU's `-vnc` takes a display number, port 5900 + n.
+fn free_vnc_port() -> Result<u16> {
+    (5900..6000)
+        .find(|p| TcpListener::bind((Ipv4Addr::LOCALHOST, *p)).is_ok())
+        .ok_or_else(|| Error::Hypervisor("no free VNC port in 5900-5999".into()))
+}
+
 fn password() -> String {
     const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut rng = rand::rng();
@@ -586,6 +844,26 @@ fn find_firmware(binary: &Path) -> Option<PathBuf> {
         .into_iter()
         .flat_map(|d| [d.join("edk2-aarch64-code.fd"), d.join("AAVMF_CODE.fd")])
         .find(|p| p.is_file())
+}
+
+/// OVMF code + variable template pairs, as Linux distros, Homebrew and the Windows installer ship them.
+fn find_ovmf(binary: &Path) -> Option<Uefi> {
+    let bin = binary.parent()?;
+    let dirs = [
+        bin.join("../share/qemu"),
+        bin.join("share"),
+        PathBuf::from("/usr/share/OVMF"),
+        PathBuf::from("/usr/share/edk2/ovmf"),
+    ];
+    let pairs = [
+        ("edk2-x86_64-code.fd", "edk2-i386-vars.fd"),
+        ("OVMF_CODE_4M.fd", "OVMF_VARS_4M.fd"),
+        ("OVMF_CODE.fd", "OVMF_VARS.fd"),
+    ];
+    dirs.iter()
+        .flat_map(|d| pairs.map(|(c, v)| (d.join(c), d.join(v))))
+        .find(|(c, v)| c.is_file() && v.is_file())
+        .map(|(code, vars)| Uefi { code, vars })
 }
 
 fn pack_snapshot(launch: &Launch, state: &[u8], disk: &[u8]) -> Result<Vec<u8>> {

@@ -1,5 +1,6 @@
 //! Guest image management for the Host view: what is installed, what can be
-//! downloaded, and background downloads with progress the UI polls.
+//! downloaded, background downloads with progress the UI polls, and imports
+//! of the provider's own ISOs and disks (a Windows installer, for example).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,6 +21,9 @@ pub struct Download {
     done: u64,
     total: Option<u64>,
     error: Option<String>,
+    /// A local file being copied in rather than a download.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    import: bool,
 }
 
 #[derive(Debug)]
@@ -76,7 +80,7 @@ pub async fn pull_image(state: State<'_, AppState>, name: String) -> Result<(), 
             move |done, total| {
                 // try_lock: never stall the download on a UI poll.
                 if let Ok(mut d) = downloads.try_lock() {
-                    d.insert(name.clone(), Download { done, total, error: None });
+                    d.insert(name.clone(), Download { done, total, ..Download::default() });
                 }
             }
         };
@@ -93,4 +97,47 @@ pub async fn pull_image(state: State<'_, AppState>, name: String) -> Result<(), 
         }
     });
     Ok(())
+}
+
+/// Ask for an ISO or qcow2 file and copy it into the image directory in the
+/// background. Returns the new image's name, or `None` if the picker was cancelled.
+#[tauri::command]
+pub async fn import_image(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Option<String>, CmdError> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("Add an installer ISO or a qcow2 disk")
+        .add_filter("ISO or qcow2", &["iso", "qcow2"])
+        .pick_file(move |f| {
+            let _ = tx.send(f);
+        });
+    let Some(file) = rx.await.ok().flatten() else { return Ok(None) };
+    let src = file.into_path().map_err(|e| Error::Invalid(e.to_string()))?;
+    let name = images::name_from_file(&src);
+    images::validate_name(&name)?;
+    let s = &state.images;
+    {
+        let mut downloads = s.downloads.lock().await;
+        if downloads.get(&name).is_some_and(|d| d.error.is_none()) {
+            return Ok(Some(name)); // already copying
+        }
+        let total = std::fs::metadata(&src).ok().map(|m| m.len());
+        downloads.insert(name.clone(), Download { total, import: true, ..Download::default() });
+    }
+    let (dir, downloads, task_name) = (s.dir.clone(), s.downloads.clone(), name.clone());
+    tauri::async_runtime::spawn(async move {
+        let result = images::import(&dir, &src, Some(&task_name)).await;
+        let mut d = downloads.lock().await;
+        match result {
+            Ok(_) => {
+                d.remove(&task_name);
+            }
+            Err(e) => {
+                tracing::warn!(image = %task_name, error = %e, "image import failed");
+                d.insert(task_name, Download { error: Some(e.to_string()), import: true, ..Download::default() });
+            }
+        }
+    });
+    Ok(Some(name))
 }

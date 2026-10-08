@@ -1,10 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { commands } from "../bridge/commands";
-import type { Images } from "../bridge/types";
+import type { Images, LocalImage } from "../bridge/types";
 import { Button, Card, ErrorNote } from "./ui";
 
 const gib = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+
+/** "Windows installer · ARM64" for an ISO, from its volume label. */
+export function imageTitle(image: LocalImage | undefined): string {
+  if (!image) return "Custom image";
+  if (image.kind === "disk") return "Custom disk";
+  const what = image.iso?.windows ? "Windows installer" : "Installer ISO";
+  const arch = image.iso?.arch === "aarch64" ? " · ARM64" : image.iso?.arch === "x86_64" ? " · x64" : "";
+  return `${what}${arch}`;
+}
 
 /** Guest OS images on this machine, and downloads from the catalog. */
 export function LocalImages() {
@@ -27,7 +36,19 @@ export function LocalImages() {
   }, [refresh, downloading]);
 
   if (!images) return null;
-  const names = [...new Set([...images.catalog.map((c) => c.name), ...images.installed.map((i) => i.name)])];
+  const names = [
+    ...new Set([...images.catalog.map((c) => c.name), ...images.installed.map((i) => i.name), ...Object.keys(images.downloads)]),
+  ];
+
+  const importFile = async () => {
+    setError(null);
+    try {
+      await commands.importImage();
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   const pull = async (name: string) => {
     setError(null);
@@ -40,11 +61,18 @@ export function LocalImages() {
   };
 
   return (
-    <Card title="Guest images">
+    <Card
+      title="Guest images"
+      actions={
+        <Button variant="ghost" onClick={() => void importFile()}>
+          Add ISO or disk…
+        </Button>
+      }
+    >
       <ul className="divide-y divide-slate-800 text-sm">
         {names.map((name) => {
           const local = images.installed.find((i) => i.name === name);
-          const title = images.catalog.find((c) => c.name === name)?.title ?? "Custom image";
+          const title = images.catalog.find((c) => c.name === name)?.title ?? imageTitle(local);
           const dl = images.downloads[name];
           const pct = dl?.total ? Math.floor((dl.done / dl.total) * 100) : null;
           return (
@@ -56,7 +84,9 @@ export function LocalImages() {
               {local ? (
                 <span className="text-xs text-emerald-400">installed · {gib(local.sizeBytes)}</span>
               ) : dl && !dl.error ? (
-                <span className="font-mono text-xs text-cyan-300">{pct === null ? "downloading…" : `downloading ${pct}%`}</span>
+                <span className="font-mono text-xs text-cyan-300">
+                  {dl.import ? "copying…" : pct === null ? "downloading…" : `downloading ${pct}%`}
+                </span>
               ) : (
                 <Button variant="ghost" onClick={() => void pull(name)}>
                   {dl?.error ? "Retry" : "Download"}
@@ -73,7 +103,7 @@ export function LocalImages() {
         ))}
       <ErrorNote error={error} />
       <p className="mt-2 truncate text-xs text-slate-500" title={images.dir}>
-        Any qcow2 disk placed in {images.dir} (a Windows guest too) can be deployed by its file name.
+        ISOs (a Windows installer too) and qcow2 disks in {images.dir} can be deployed from the Console.
       </p>
     </Card>
   );

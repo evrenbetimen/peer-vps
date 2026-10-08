@@ -125,3 +125,17 @@ test("a deployed instance shows how to SSH in", async ({ page }) => {
   await expect(page.getByRole("button", { name: /^ssh -p \d+ peervps@127\.0\.0\.1$/ })).toBeVisible();
   await expect(page.getByText("mock-password")).toBeVisible();
 });
+
+test("a Windows ISO is added and installs with a screen and Remote Desktop", async ({ page }) => {
+  await page.getByRole("button", { name: "Add ISO or disk…" }).click();
+  const iso = page.getByTestId("image-win11_24h2_english_arm64");
+  await expect(iso).toContainText("installed", { timeout: 10_000 });
+  await expect(iso).toContainText("Windows installer · ARM64");
+  await nav(page, "Console").click();
+  await page.getByRole("button", { name: /win11_24h2_english_arm64/ }).click({ timeout: 10_000 });
+  await expect(page.getByText(/Windows signs in the user shown there/)).toBeVisible();
+  await page.getByRole("button", { name: "Deploy" }).click();
+  await expect(page.getByText("Remote Desktop", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open screen" })).toBeVisible();
+  await shot(page, "windows-iso");
+});

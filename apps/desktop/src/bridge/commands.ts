@@ -54,6 +54,9 @@ export const commands = {
   restorePeer: (peer: string) => call<Topology>("restore_peer", { peer }),
   getInstanceAccess: (id: string) => call<GuestAccess | null>("get_instance_access", { id }),
   getConsole: (id: string) => call<string | null>("get_console", { id }),
+  openGuestScreen: (id: string) => call<void>("open_guest_screen", { id }),
   listImages: () => call<Images>("list_images"),
   pullImage: (name: string) => call<void>("pull_image", { name }),
+  /** Opens a file picker; resolves to the new image's name, or null when cancelled. */
+  importImage: () => call<string | null>("import_image"),
 };

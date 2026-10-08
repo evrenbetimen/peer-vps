@@ -71,9 +71,10 @@ enum Cmd {
     Status { id: Option<String> },
     /// Tail of the instance's serial console.
     Console { id: String },
-    /// SSH endpoint, user and password for an instance (QEMU backend).
+    /// How to reach an instance (QEMU backend): SSH, or for ISO installs the
+    /// screen (VNC) and, for Windows, Remote Desktop.
     Access { id: String },
-    /// Manage guest disk images for the QEMU backend.
+    /// Manage guest images (cloud disks and installer ISOs) for the QEMU backend.
     Image {
         #[command(subcommand)]
         cmd: ImageCmd,
@@ -97,6 +98,16 @@ enum ImageCmd {
     },
     /// List installed images and the downloadable catalog.
     List {
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Copy a qcow2 disk or an installer ISO (a Windows ISO too) into the image
+    /// directory; deploy it with `--image <name>`.
+    Import {
+        file: PathBuf,
+        /// Image name; defaults to the file name.
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long)]
         dir: Option<PathBuf>,
     },
@@ -204,6 +215,12 @@ async fn image(cmd: ImageCmd) -> Result<Value> {
             let dir = images_dir(dir);
             Ok(json!({ "dir": dir, "installed": images::list(&dir)?, "catalog": images::CATALOG }))
         }
+        ImageCmd::Import { file, name, dir } => {
+            let dir = images_dir(dir);
+            eprintln!("copying {} into {}", file.display(), dir.display());
+            let image = images::import(&dir, &file, name.as_deref()).await?;
+            Ok(json!({ "image": image, "deploy": format!("peervps deploy <offer> --image {}", image.name) }))
+        }
     }
 }
 
@@ -277,13 +294,19 @@ async fn main() -> Result<()> {
             let out = client.get(&format!("/v1/instances/{id}/access"), &[]).await?;
             match out.get("access") {
                 Some(a) if !a.is_null() => {
-                    let cmd = format!(
-                        "ssh -p {} {}@{}",
-                        a["sshPort"],
-                        a["user"].as_str().unwrap_or_default(),
-                        a["sshHost"].as_str().unwrap_or_default()
-                    );
-                    json!({ "access": a, "command": cmd })
+                    let access: peervps_core::virtualization::GuestAccess = serde_json::from_value(a.clone())?;
+                    let mut out = json!({ "access": a });
+                    if access.windows {
+                        if let Some(rdp) = &access.rdp {
+                            out["rdp"] = json!(format!("Remote Desktop to {rdp} as {}", access.user));
+                        }
+                    } else {
+                        out["command"] = json!(access.ssh_command());
+                    }
+                    if let Some(display) = &access.display {
+                        out["screen"] = json!(format!("open {display} (VNC)"));
+                    }
+                    out
                 }
                 _ => bail!("this node's hypervisor gives guests no SSH endpoint"),
             }

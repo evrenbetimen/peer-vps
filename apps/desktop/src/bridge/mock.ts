@@ -32,7 +32,9 @@ const catalog = [
   { name: "ubuntu-22.04", title: "Ubuntu 22.04 LTS" },
   { name: "debian-13", title: "Debian 13" },
 ];
-const installed: Images["installed"] = [{ name: "ubuntu-24.04", sizeBytes: 625_612_288 }];
+const installed: Images["installed"] = [{ name: "ubuntu-24.04", sizeBytes: 625_612_288, kind: "disk" }];
+/** What the mock file picker "chooses". */
+const MOCK_ISO = { name: "win11_24h2_english_arm64", sizeBytes: 5_800_000_000, kind: "iso" as const, iso: { label: "CPBA_A64FRE_EN-US_DV9", windows: true, arch: "aarch64" as const } };
 const downloads: Images["downloads"] = {};
 const MOCK_IMAGE_BYTES = 400_000_000;
 
@@ -45,7 +47,7 @@ function simulateDownload(name: string) {
     if (d.done >= MOCK_IMAGE_BYTES) {
       clearInterval(id);
       delete downloads[name];
-      installed.push({ name, sizeBytes: MOCK_IMAGE_BYTES });
+      installed.push({ name, sizeBytes: MOCK_IMAGE_BYTES, kind: "disk" });
     }
   }, 250);
 }
@@ -163,7 +165,24 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         const inst = instances.find((i) => i.id === args.id);
         if (!inst) throw { code: "not_found", message: `instance ${String(args.id)}` };
         if (inst.state === "terminated") return null;
-        return { sshHost: "127.0.0.1", sshPort: 2200 + instances.indexOf(inst), user: "peervps", password: "mock-password" };
+        const port = 2200 + instances.indexOf(inst);
+        const image = installed.find((i) => i.name === inst.spec.image);
+        if (image?.iso?.windows) {
+          return { sshHost: "127.0.0.1", sshPort: port, user: "peervps", password: "mock-password", windows: true, rdp: `127.0.0.1:${port + 1000}`, display: "vnc://127.0.0.1:5900", displayPassword: "mock-pas" };
+        }
+        return { sshHost: "127.0.0.1", sshPort: port, user: "peervps", password: "mock-password" };
+      }
+      case "open_guest_screen":
+        return null;
+      case "import_image": {
+        if (!downloads[MOCK_ISO.name] && !installed.some((i) => i.name === MOCK_ISO.name)) {
+          downloads[MOCK_ISO.name] = { done: 0, total: MOCK_ISO.sizeBytes, error: null, import: true };
+          setTimeout(() => {
+            delete downloads[MOCK_ISO.name];
+            installed.push(structuredClone(MOCK_ISO));
+          }, 1000);
+        }
+        return MOCK_ISO.name;
       }
       case "get_console": {
         const inst = instances.find((i) => i.id === args.id);
