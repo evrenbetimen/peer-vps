@@ -12,6 +12,7 @@ service NodeService {
   rpc ListInstances(ListInstancesRequest) returns (ListInstancesResponse);
   rpc Scale(ScaleRequest) returns (Instance);
   rpc Terminate(TerminateRequest) returns (Instance);
+  rpc GetConsole(GetConsoleRequest) returns (Console);
   rpc GetAccount(GetAccountRequest) returns (Account);
   // Server-streamed node events (metrics, balance, route and failover changes).
   rpc WatchEvents(WatchEventsRequest) returns (stream NodeEvent);
@@ -96,6 +97,8 @@ message ListInstancesResponse { repeated Instance instances = 1; }
 message ScaleRequest { string id = 1; uint32 replicas = 2; }
 message TerminateRequest { string id = 1; }
 message GetAccountRequest {}
+message GetConsoleRequest { string id = 1; }
+message Console { optional string console = 1; } // unset when the backend has no serial capture
 
 message LedgerEntry {
   int64 id = 1;

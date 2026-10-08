@@ -6,12 +6,15 @@
 //! [`Hypervisor`] backend. Backends:
 //!
 //! * [`kvm::KvmHypervisor`] — direct `/dev/kvm` via `kvm-ioctls` (Linux only).
+//! * [`firecracker::FirecrackerHypervisor`] — one Firecracker process per guest;
+//!   boots real kernels, pauses, snapshots and restores (Linux only).
 //! * [`mock::MockHypervisor`] — in-memory backend for tests, CI and non-Linux hosts.
 //!
-//! A Firecracker-process backend can slot in behind the same trait later.
 
 pub mod accel;
 pub mod confidential;
+#[cfg(target_os = "linux")]
+pub mod firecracker;
 #[cfg(target_os = "linux")]
 pub mod kvm;
 pub mod mock;
@@ -108,6 +111,10 @@ pub trait Hypervisor: Send + Sync + fmt::Debug {
     async fn snapshot(&self, id: VmId) -> Result<VmSnapshot>;
     async fn restore(&self, snapshot: VmSnapshot, placement: &Placement) -> Result<()>;
     async fn destroy(&self, id: VmId) -> Result<()>;
+    /// Last `max_bytes` of the guest's serial console, if the backend captures it.
+    async fn console_tail(&self, _id: VmId, _max_bytes: usize) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// The slice of this machine the provider chose to rent out.

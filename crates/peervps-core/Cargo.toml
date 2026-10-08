@@ -36,6 +36,7 @@ zstd.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-bindings.workspace = true
 kvm-ioctls.workspace = true
+nix.workspace = true
 tun.workspace = true
 vm-memory.workspace = true
 

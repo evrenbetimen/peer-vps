@@ -159,7 +159,12 @@ impl Node {
     /// Like [`Self::demo`] but persisting to `store`. Seeding is skipped if the
     /// demo accounts already exist, so restarting keeps balances.
     pub async fn demo_with(store: Store) -> Result<(Self, String)> {
-        let node = Self::new(NodeConfig::default(), store, Arc::new(MockHypervisor::default()))?;
+        Self::demo_with_hypervisor(store, Arc::new(MockHypervisor::default())).await
+    }
+
+    /// Demo marketplace and accounts on top of a real hypervisor backend.
+    pub async fn demo_with_hypervisor(store: Store, hypervisor: Arc<dyn Hypervisor>) -> Result<(Self, String)> {
+        let node = Self::new(NodeConfig::default(), store, hypervisor)?;
         *node.offers.write().await = demo_offers();
         let key = "pvps_demo_key".to_owned();
         if node.ledger.balance("demo-agent").await.is_ok() {
@@ -314,6 +319,15 @@ impl Node {
         let done = Instance { state: InstanceState::Terminated, ..inst };
         self.instances.lock().await.insert(done.id.clone(), done.clone());
         Ok(done)
+    }
+
+    /// Tail of the instance's serial console (`None` when the backend does not capture it).
+    pub async fn console(&self, renter: &str, id: &str, max_bytes: usize) -> Result<Option<String>> {
+        let inst = self.instance(renter, id).await?;
+        if inst.state == InstanceState::Terminated {
+            return Ok(None);
+        }
+        self.provisioner.hypervisor().console_tail(inst.vm, max_bytes).await
     }
 
     pub async fn account(&self, account: &str) -> Result<AccountSummary> {
