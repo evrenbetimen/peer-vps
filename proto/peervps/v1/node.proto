@@ -1,0 +1,120 @@
+// gRPC contract for the PeerVPS agent API. Mirrors the REST routes in
+// crates/peervps-core/src/api/mod.rs one-to-one; the tonic server that
+// implements it is a follow-up to this scaffold.
+syntax = "proto3";
+
+package peervps.v1;
+
+service NodeService {
+  rpc ListOffers(ListOffersRequest) returns (ListOffersResponse);
+  rpc Deploy(DeployRequest) returns (Instance);
+  rpc GetInstance(GetInstanceRequest) returns (Instance);
+  rpc ListInstances(ListInstancesRequest) returns (ListInstancesResponse);
+  rpc Scale(ScaleRequest) returns (Instance);
+  rpc Terminate(TerminateRequest) returns (Instance);
+  rpc GetAccount(GetAccountRequest) returns (Account);
+  // Server-streamed node events (metrics, balance, route and failover changes).
+  rpc WatchEvents(WatchEventsRequest) returns (stream NodeEvent);
+}
+
+enum AcceleratorKind {
+  ACCELERATOR_KIND_UNSPECIFIED = 0;
+  ACCELERATOR_KIND_NONE = 1;
+  ACCELERATOR_KIND_GPU = 2;
+  ACCELERATOR_KIND_NPU = 3;
+}
+
+message Offer {
+  string id = 1;
+  string provider = 2;
+  string region = 3;
+  uint32 vcpus = 4;
+  uint64 mem_mib = 5;
+  uint64 disk_gib = 6;
+  AcceleratorKind accelerator = 7;
+  optional string accelerator_model = 8;
+  uint64 vram_mib = 9;
+  int64 price_per_sec = 10; // µcredits
+  double sla_pct = 11;
+  bool confidential = 12;
+  int64 collateral_locked = 13;
+}
+
+message ListOffersRequest {
+  optional uint64 min_vram_mib = 1;
+  optional int64 max_price_per_hour = 2; // µcredits
+  optional double min_sla_pct = 3;
+  optional AcceleratorKind accelerator = 4;
+  optional bool confidential = 5;
+  string sort = 6; // price | vram | sla
+  uint32 limit = 7;
+}
+
+message ListOffersResponse { repeated Offer offers = 1; }
+
+message AcceleratorRequest {
+  AcceleratorKind kind = 1;
+  uint32 slices = 2;
+  uint64 min_vram_mib = 3;
+}
+
+message VmSpec {
+  uint32 vcpus = 1;
+  uint64 mem_mib = 2;
+  uint64 disk_gib = 3;
+  string image = 4;
+  optional AcceleratorRequest accelerator = 5;
+  bool confidential = 6;
+}
+
+message DeployRequest {
+  string offer_id = 1;
+  VmSpec spec = 2;
+}
+
+enum InstanceState {
+  INSTANCE_STATE_UNSPECIFIED = 0;
+  INSTANCE_STATE_RUNNING = 1;
+  INSTANCE_STATE_SCALED_TO_ZERO = 2;
+  INSTANCE_STATE_TERMINATED = 3;
+}
+
+message Instance {
+  string id = 1;
+  string vm = 2;
+  string offer_id = 3;
+  VmSpec spec = 4;
+  InstanceState state = 5;
+  string virtual_ip = 6;
+  int64 price_per_sec = 7;
+  int64 created_at = 8;
+}
+
+message GetInstanceRequest { string id = 1; }
+message ListInstancesRequest {}
+message ListInstancesResponse { repeated Instance instances = 1; }
+message ScaleRequest { string id = 1; uint32 replicas = 2; }
+message TerminateRequest { string id = 1; }
+message GetAccountRequest {}
+
+message LedgerEntry {
+  int64 id = 1;
+  int64 delta = 2;
+  int64 balance_after = 3;
+  string kind = 4;
+  optional string reference = 5;
+  int64 at = 6;
+}
+
+message Account {
+  string account = 1;
+  int64 balance = 2;
+  repeated LedgerEntry history = 3;
+}
+
+message WatchEventsRequest {}
+
+message NodeEvent {
+  // JSON-encoded peervps_core::NodeEvent; typed variants will replace this.
+  string json = 1;
+}

@@ -1,0 +1,11 @@
+{
+  "name": "peervps",
+  "private": true,
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "dev": "pnpm --filter @peervps/desktop dev",
+    "build": "pnpm --filter @peervps/desktop build",
+    "typecheck": "pnpm --filter @peervps/desktop typecheck",
+    "tauri": "pnpm --filter @peervps/desktop tauri"
+  }
+}
