@@ -111,14 +111,30 @@ pub struct VmSnapshot {
 pub struct GuestAccess {
     pub ssh_host: String,
     pub ssh_port: u16,
+    /// Login user; empty when it is chosen during an OS installation.
     pub user: String,
     /// Set when the guest was provisioned with password login.
     pub password: Option<String>,
+    /// Windows guest: sign in over RDP, there is no SSH server by default.
+    #[serde(default)]
+    pub windows: bool,
+    /// Remote Desktop endpoint (`host:port`), for Windows guests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rdp: Option<String>,
+    /// The guest's screen (`vnc://host:port`), for guests installed from an ISO.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_password: Option<String>,
 }
 
 impl GuestAccess {
     pub fn ssh_command(&self) -> String {
-        format!("ssh -p {} {}@{}", self.ssh_port, self.user, self.ssh_host)
+        if self.user.is_empty() {
+            format!("ssh -p {} {}", self.ssh_port, self.ssh_host)
+        } else {
+            format!("ssh -p {} {}@{}", self.ssh_port, self.user, self.ssh_host)
+        }
     }
 }
 

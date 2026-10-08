@@ -86,10 +86,30 @@ peervps access <instance-id>                     # {"command": "ssh -p 40123 pee
 ```
 
 Images live in `~/.local/share/peervps/images`, `~/Library/Application Support/PeerVPS/images` or
-`%LOCALAPPDATA%\PeerVPS\images`. Any qcow2 disk dropped there can be deployed by its file name, including
-a Windows guest you bring yourself (it needs virtio drivers; cloud-init setup is skipped for it). macOS
-guests are not offered: Apple's license only allows them on Apple hardware through Virtualization.framework,
-which is a separate backend.
+`%LOCALAPPDATA%\PeerVPS\images`. Any qcow2 disk there can be deployed by its file name. macOS guests are not
+offered: Apple's license only allows them on Apple hardware through Virtualization.framework, which is a
+separate backend.
+
+### Installing from an ISO (Windows too)
+
+Add an installer ISO with **Host → Guest images → Add ISO or disk…** or `peervps image import <file.iso>`,
+then deploy it like any other image. The guest boots the installer with a blank disk, and its screen is on a
+password-protected loopback VNC port: **Open screen** on the instance (or `open vnc://…` from `peervps access`).
+
+Windows ISOs are recognized by their volume label and get what Windows needs without extra drivers: an NVMe
+disk, an e1000e network card on x86, UEFI on x86 when OVMF is installed, and an answer file on a small USB
+stick that skips Windows 11's TPM / Secure Boot / RAM checks, creates the `peervps` administrator with the
+password the instance shows, and turns on Remote Desktop (forwarded to a loopback port; Windows Pro and up).
+You still pick the language, edition and disk on the installer screen. Requirements and caveats:
+
+- Use the ISO for your machine's CPU: on Apple silicon the **Windows 11 ARM64** ISO
+  (microsoft.com/software-download/windows11arm64). The other architecture is refused, since it would only
+  run emulated.
+- At least 4 GiB RAM and a 32 GiB disk (80 GiB is a comfortable default); the disk file grows as Windows fills it.
+- Windows on Arm has no in-box driver for the virtio network card: put `virtio-win.iso`
+  (from the Fedora virtio-win project) in the image directory as `virtio-win.iso`; it is attached to Windows
+  guests and its network driver is installed on first sign-in.
+- Scale to zero is not available for ISO-installed guests yet; pause or terminate them instead.
 
 ## What is real and what is a stub
 

@@ -56,6 +56,8 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -115,8 +117,10 @@ pub fn run() {
             commands::restore_peer,
             commands::get_instance_access,
             commands::get_console,
+            commands::open_guest_screen,
             images::list_images,
             images::pull_image,
+            images::import_image,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {

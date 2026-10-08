@@ -1,10 +1,12 @@
-//! Guest disk images for the QEMU backend.
+//! Guest images for the QEMU backend.
 //!
-//! An image is a qcow2 file named `<name>.qcow2` in the node's image
-//! directory. Stock cloud images from the catalog below can be pulled with
-//! [`pull`] (checksum-verified); anything else, a Windows guest included, can
-//! be dropped into the directory by hand. Guests boot from a copy-on-write
-//! overlay, so one base image serves any number of VMs.
+//! An image is a file in the node's image directory, either a qcow2 disk
+//! (`<name>.qcow2`) or an installer ISO (`<name>.iso`). Stock cloud images
+//! from the catalog below can be pulled with [`pull`] (checksum-verified);
+//! any other disk or ISO, a Windows installer included, can be added with
+//! [`import`] or dropped into the directory by hand. Disk guests boot from a
+//! copy-on-write overlay, so one base image serves any number of VMs; ISO
+//! guests boot the installer with a blank disk.
 
 use std::path::{Path, PathBuf};
 
@@ -77,12 +79,78 @@ impl CatalogImage {
     }
 }
 
+/// What an installed image boots as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageKind {
+    /// A bootable qcow2 disk (cloud image or a prepared guest).
+    Disk,
+    /// An installer ISO, booted with a blank disk.
+    Iso,
+}
+
+impl ImageKind {
+    fn ext(self) -> &'static str {
+        match self {
+            Self::Disk => "qcow2",
+            Self::Iso => "iso",
+        }
+    }
+}
+
 /// An image present in the directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalImage {
     pub name: String,
     pub size_bytes: u64,
+    pub kind: ImageKind,
+    /// For ISOs: what the installer is, read from its volume label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iso: Option<IsoInfo>,
+}
+
+/// What an installer ISO contains, as far as its ISO 9660 volume label tells.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsoInfo {
+    pub label: String,
+    pub windows: bool,
+    /// CPU architecture the installer is for, when the label says (`x86_64` / `aarch64`).
+    pub arch: Option<&'static str>,
+}
+
+/// Microsoft's ISO labels: `CCCOMA_X64FRE_EN-US_DV9`, `CPBA_A64FRE_...`, `CCSA_X64FRE_...`, `CENA_X64FREV_...`.
+const WINDOWS_LABELS: &[&str] = &["CCCOMA_", "CPBA_", "CCSA_", "CENA_", "J_CCSA", "SSS_", "ESD-ISO", "WIN"];
+
+/// Read the ISO 9660 primary volume descriptor of `path`. `name` (the image
+/// name) also counts: a renamed or remastered Windows ISO is still Windows.
+pub fn iso_info(path: &Path, name: &str) -> Result<IsoInfo> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let mut pvd = [0u8; 2048];
+    f.seek(SeekFrom::Start(16 * 2048))?;
+    f.read_exact(&mut pvd).map_err(|_| Error::Invalid(format!("{} is not an ISO image", path.display())))?;
+    if &pvd[1..6] != b"CD001" {
+        return Err(Error::Invalid(format!("{} is not an ISO image", path.display())));
+    }
+    let label = String::from_utf8_lossy(&pvd[40..72]).trim().to_owned();
+    Ok(classify_iso(label, name))
+}
+
+fn classify_iso(label: String, name: &str) -> IsoInfo {
+    let upper = label.to_ascii_uppercase();
+    let lname = name.to_ascii_lowercase();
+    let windows = WINDOWS_LABELS.iter().any(|p| upper.starts_with(p)) || lname.contains("win");
+    let has = |needles: &[&str]| needles.iter().any(|n| upper.contains(n) || lname.contains(&n.to_ascii_lowercase()));
+    let arch = if has(&["A64", "ARM64", "AARCH64"]) {
+        Some("aarch64")
+    } else if has(&["X64", "AMD64", "X86_64"]) {
+        Some("x86_64")
+    } else {
+        None
+    };
+    IsoInfo { label, windows, arch }
 }
 
 /// Image names come from renters: allow only a plain file stem.
@@ -101,16 +169,33 @@ pub fn path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}.qcow2"))
 }
 
-/// Path of an installed image, or `NotFound` with a hint on how to get it.
-pub fn resolve(dir: &Path, name: &str) -> Result<PathBuf> {
+pub fn iso_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}.iso"))
+}
+
+/// An installed image, located.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    pub path: PathBuf,
+    pub kind: ImageKind,
+}
+
+/// Path of an installed image (a disk wins over an ISO of the same name), or
+/// `NotFound` with a hint on how to get it.
+pub fn resolve(dir: &Path, name: &str) -> Result<Resolved> {
     validate_name(name)?;
-    let p = path(dir, name);
-    if p.is_file() {
-        return Ok(p);
+    for kind in [ImageKind::Disk, ImageKind::Iso] {
+        let p = dir.join(format!("{name}.{}", kind.ext()));
+        if p.is_file() {
+            return Ok(Resolved { path: p, kind });
+        }
     }
     let hint = match CatalogImage::get(name) {
         Some(_) => format!("run `peervps image pull {name}`"),
-        None => format!("put a qcow2 disk at {}", p.display()),
+        None => format!(
+            "run `peervps image import <file.iso|file.qcow2>` or put {name}.qcow2 / {name}.iso in {}",
+            dir.display()
+        ),
     };
     Err(Error::NotFound(format!("image {name} is not installed; {hint}")))
 }
@@ -120,15 +205,80 @@ pub fn list(dir: &Path) -> Result<Vec<LocalImage>> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Ok(out) };
     for e in entries.flatten() {
         let p = e.path();
-        if p.extension().is_some_and(|x| x == "qcow2")
-            && let Some(stem) = p.file_stem().and_then(|s| s.to_str())
+        let kind = match p.extension().and_then(|x| x.to_str()) {
+            Some("qcow2") => ImageKind::Disk,
+            Some("iso") => ImageKind::Iso,
+            _ => continue,
+        };
+        if let Some(stem) = p.file_stem().and_then(|s| s.to_str())
             && validate_name(stem).is_ok()
+            // Shadowed by a disk of the same name (see `resolve`).
+            && !(kind == ImageKind::Iso && path(dir, stem).is_file())
         {
-            out.push(LocalImage { name: stem.to_owned(), size_bytes: e.metadata().map(|m| m.len()).unwrap_or(0) });
+            out.push(LocalImage {
+                name: stem.to_owned(),
+                size_bytes: e.metadata().map(|m| m.len()).unwrap_or(0),
+                kind,
+                iso: (kind == ImageKind::Iso).then(|| iso_info(&p, stem).ok()).flatten(),
+            });
         }
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+/// An image name derived from a file name: `Win11_24H2_English_Arm64.iso` → `win11_24h2_english_arm64`.
+pub fn name_from_file(file: &Path) -> String {
+    let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+    let mut name: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c.to_ascii_lowercase() } else { '-' })
+        .collect::<String>()
+        .trim_start_matches('.')
+        .chars()
+        .take(64)
+        .collect();
+    if name.is_empty() {
+        name = "image".into();
+    }
+    name
+}
+
+/// Copy a qcow2 disk or an installer ISO from `src` into `dir` as `name`
+/// (default: derived from the file name). Refuses to replace an existing image.
+pub async fn import(dir: &Path, src: &Path, name: Option<&str>) -> Result<LocalImage> {
+    let kind = match src.extension().and_then(|x| x.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("iso") => ImageKind::Iso,
+        Some("qcow2" | "img") => ImageKind::Disk,
+        _ => return Err(Error::Invalid(format!("{}: expected a .iso or .qcow2 file", src.display()))),
+    };
+    let name = name.map(str::to_owned).unwrap_or_else(|| name_from_file(src));
+    validate_name(&name)?;
+    let iso = match kind {
+        ImageKind::Iso => Some(iso_info(src, &name)?),
+        ImageKind::Disk => {
+            let mut magic = [0u8; 4];
+            use std::io::Read;
+            std::fs::File::open(src)?.read_exact(&mut magic)?;
+            if &magic != b"QFI\xfb" {
+                return Err(Error::Invalid(format!("{} is not a qcow2 disk", src.display())));
+            }
+            None
+        }
+    };
+    if resolve(dir, &name).is_ok() {
+        return Err(Error::Invalid(format!("an image named {name} already exists in {}", dir.display())));
+    }
+    tokio::fs::create_dir_all(dir).await?;
+    let dest = dir.join(format!("{name}.{}", kind.ext()));
+    let part = dir.join(format!("{name}.{}.part", kind.ext()));
+    if let Err(e) = tokio::fs::copy(src, &part).await {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(e.into());
+    }
+    tokio::fs::rename(&part, &dest).await?;
+    let size_bytes = tokio::fs::metadata(&dest).await?.len();
+    Ok(LocalImage { name, size_bytes, kind, iso })
 }
 
 /// Download a catalog image into `dir`, verify its published checksum, and
@@ -207,7 +357,7 @@ fn expected_sum<'a>(sums: &'a str, file: &str) -> Option<&'a str> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -220,12 +370,66 @@ mod tests {
         let err = resolve(&dir, "ubuntu-24.04").expect_err("missing");
         assert!(err.to_string().contains("peervps image pull ubuntu-24.04"), "{err}");
         let err = resolve(&dir, "windows-11").expect_err("missing");
-        assert!(err.to_string().contains("windows-11.qcow2"), "{err}");
+        assert!(err.to_string().contains("windows-11.qcow2") && err.to_string().contains("image import"), "{err}");
         std::fs::write(path(&dir, "windows-11"), b"x").expect("write");
         std::fs::write(dir.join("notes.txt"), b"x").expect("write");
-        assert_eq!(resolve(&dir, "windows-11").expect("found"), path(&dir, "windows-11"));
-        assert_eq!(list(&dir).expect("list"), vec![LocalImage { name: "windows-11".into(), size_bytes: 1 }]);
+        assert_eq!(resolve(&dir, "windows-11").expect("found").path, path(&dir, "windows-11"));
+        assert_eq!(
+            list(&dir).expect("list"),
+            vec![LocalImage { name: "windows-11".into(), size_bytes: 1, kind: ImageKind::Disk, iso: None }]
+        );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A minimal ISO 9660 image: 16 empty sectors, then a primary volume descriptor.
+    pub(crate) fn fake_iso(path: &Path, label: &str) {
+        let mut bytes = vec![0u8; 18 * 2048];
+        let pvd = &mut bytes[16 * 2048..17 * 2048];
+        pvd[0] = 1;
+        pvd[1..6].copy_from_slice(b"CD001");
+        pvd[40..72].fill(b' ');
+        pvd[40..40 + label.len()].copy_from_slice(label.as_bytes());
+        std::fs::write(path, bytes).expect("write iso");
+    }
+
+    #[tokio::test]
+    async fn imports_isos_and_reads_their_labels() {
+        let root = std::env::temp_dir().join(format!("pvps-iso-{}", uuid::Uuid::new_v4().simple()));
+        let (src, dir) = (root.join("src"), root.join("images"));
+        std::fs::create_dir_all(&src).expect("mkdir");
+        let iso = src.join("Win11_24H2_English_Arm64.iso");
+        fake_iso(&iso, "CPBA_A64FRE_EN-US_DV9");
+
+        let img = import(&dir, &iso, None).await.expect("import");
+        assert_eq!(img.name, "win11_24h2_english_arm64");
+        assert_eq!(img.kind, ImageKind::Iso);
+        let info = img.iso.expect("iso info");
+        assert!(info.windows);
+        assert_eq!(info.arch, Some("aarch64"));
+        let r = resolve(&dir, &img.name).expect("resolve");
+        assert_eq!((r.kind, r.path), (ImageKind::Iso, iso_path(&dir, &img.name)));
+        assert_eq!(list(&dir).expect("list")[0].iso.as_ref().map(|i| i.label.as_str()), Some("CPBA_A64FRE_EN-US_DV9"));
+
+        let err = import(&dir, &iso, None).await.expect_err("duplicate");
+        assert!(err.to_string().contains("already exists"), "{err}");
+        let not_iso = src.join("fake.iso");
+        std::fs::write(&not_iso, vec![0u8; 40_000]).expect("write");
+        assert!(import(&dir, &not_iso, None).await.is_err());
+        let txt = src.join("notes.txt");
+        std::fs::write(&txt, b"x").expect("write");
+        assert!(import(&dir, &txt, None).await.is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn classifies_installers() {
+        let x64 = classify_iso("CCCOMA_X64FRE_EN-US_DV9".into(), "win11");
+        assert_eq!((x64.windows, x64.arch), (true, Some("x86_64")));
+        let ubuntu = classify_iso("Ubuntu-Server 24.04.1 LTS arm64".into(), "ubuntu-server");
+        assert_eq!((ubuntu.windows, ubuntu.arch), (false, Some("aarch64")));
+        let renamed = classify_iso("CDROM".into(), "my-windows-10");
+        assert_eq!((renamed.windows, renamed.arch), (true, None));
+        assert_eq!(name_from_file(Path::new("/x/My Disk (v2).QCOW2")), "my-disk--v2-");
     }
 
     #[test]

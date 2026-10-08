@@ -106,6 +106,10 @@ message GuestAccess {
   uint32 ssh_port = 2;
   string user = 3;
   optional string password = 4;
+  bool windows = 5;               // sign in over RDP; no SSH server by default
+  optional string rdp = 6;        // "host:port" forwarded to the guest's Remote Desktop
+  optional string display = 7;    // "vnc://host:port", the screen of a guest installed from an ISO
+  optional string display_password = 8;
 }
 message Access { optional GuestAccess access = 1; } // unset when the backend exposes no SSH endpoint
 

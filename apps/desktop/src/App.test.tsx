@@ -77,4 +77,28 @@ describe("App", () => {
     expect(await within(screen.getByTestId("image-debian-13")).findByText(/downloading/)).toBeInTheDocument();
     expect(await within(screen.getByTestId("image-debian-13")).findByText(/installed/, {}, { timeout: 5000 })).toBeInTheDocument();
   });
+
+  it("adds a Windows ISO and deploys it with a screen and Remote Desktop", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Add ISO or disk…" }));
+    const row = await screen.findByTestId("image-win11_24h2_english_arm64");
+    expect(within(row).getByText("copying…")).toBeInTheDocument();
+    expect(await within(row).findByText(/installed/, {}, { timeout: 5000 })).toBeInTheDocument();
+    expect(within(screen.getByTestId("image-win11_24h2_english_arm64")).getByText("Windows installer · ARM64")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^Console/ }));
+    await user.click(await screen.findByRole("button", { name: /win11_24h2_english_arm64/ }, { timeout: 6000 }));
+    expect(within(screen.getByRole("group", { name: "Disk" })).getByRole("button", { name: "80 GiB" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText(/Windows signs in the user shown there/)).toBeInTheDocument();
+    const deploy = screen.getByRole("button", { name: "Deploy" });
+    await vi.waitFor(() => expect(deploy).toBeEnabled());
+    await user.click(deploy);
+
+    expect(await screen.findByText("Remote Desktop")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^127\.0\.0\.1:\d+$/ })).toBeInTheDocument();
+    expect(screen.getByText("screen password")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open screen" }));
+    expect(screen.queryByText(/no screen/)).not.toBeInTheDocument();
+  }, 20_000);
 });

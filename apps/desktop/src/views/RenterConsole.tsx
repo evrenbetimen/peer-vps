@@ -2,7 +2,8 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { BridgeError, commands } from "../bridge/commands";
 import { useLive } from "../bridge/events";
-import type { AcceleratorKind, GuestAccess, Instance, Offer, OfferQuery, VmSpec } from "../bridge/types";
+import type { AcceleratorKind, GuestAccess, Instance, LocalImage, Offer, OfferQuery, VmSpec } from "../bridge/types";
+import { imageTitle } from "../components/LocalImages";
 import { Button, Card, ErrorNote } from "../components/ui";
 import { credits, cx, mib, perHour } from "../lib/format";
 
@@ -11,6 +12,23 @@ interface Template {
   name: string;
   blurb: string;
   accelerator: AcceleratorKind;
+  /** Installed from an ISO: the installer runs on a screen the renter opens. */
+  iso?: boolean;
+  windows?: boolean;
+}
+
+/** The provider's own images (ISOs, custom disks) as templates. */
+function localTemplates(installed: LocalImage[]): Template[] {
+  return installed
+    .filter((i) => !TEMPLATES.some((t) => t.image === i.name))
+    .map((i) => ({
+      image: i.name,
+      name: i.name,
+      blurb: imageTitle(i),
+      accelerator: "none",
+      iso: i.kind === "iso",
+      windows: i.iso?.windows ?? false,
+    }));
 }
 
 // xterm is the heaviest dependency; load it only when a shell is opened.
@@ -30,6 +48,7 @@ const DISK = [10, 20, 40, 80, 160];
 
 export function RenterConsole() {
   const [template, setTemplate] = useState<Template>(TEMPLATES[0]!);
+  const [local, setLocal] = useState<Template[]>([]);
   const [spec, setSpec] = useState({ vcpus: 2, memMib: 4096, diskGib: 20 });
   const [minVramGib, setMinVramGib] = useState(0);
   const [maxPerHour, setMaxPerHour] = useState(100);
@@ -64,6 +83,18 @@ export function RenterConsole() {
   useEffect(() => {
     void loadInstances();
   }, [loadInstances]);
+  useEffect(() => {
+    const load = () => commands.listImages().then((i) => setLocal(localTemplates(i.installed)), () => setLocal([]));
+    void load();
+    const id = setInterval(() => void load(), 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  const pick = (t: Template) => {
+    setTemplate(t);
+    // Windows 11 needs 4 GiB of RAM and Setup alone fills ~20 GiB.
+    if (t.windows) setSpec((s) => ({ ...s, memMib: Math.max(s.memMib, 4096), diskGib: Math.max(s.diskGib, 80) }));
+  };
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -92,12 +123,12 @@ export function RenterConsole() {
       <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
         <Card title="1 · Template">
           <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
-            {TEMPLATES.map((t) => (
+            {[...TEMPLATES, ...local].map((t) => (
               <button
                 key={t.image}
                 type="button"
                 aria-pressed={t.image === template.image}
-                onClick={() => setTemplate(t)}
+                onClick={() => pick(t)}
                 className={cx(
                   "rounded-lg border p-3 text-left transition",
                   t.image === template.image ? "border-cyan-400 bg-cyan-400/10" : "border-slate-800 hover:border-slate-600",
@@ -106,9 +137,16 @@ export function RenterConsole() {
                 <div className="text-sm font-medium">{t.name}</div>
                 <div className="text-xs text-slate-400">{t.blurb}</div>
                 {t.accelerator !== "none" && <div className="mt-1 text-[10px] uppercase tracking-wider text-violet-300">{t.accelerator}</div>}
+                {t.iso && <div className="mt-1 text-[10px] uppercase tracking-wider text-amber-300">installer</div>}
               </button>
             ))}
           </div>
+          {template.iso && (
+            <p className="mt-3 text-xs text-slate-400">
+              Boots the installer with a blank disk. Open its screen from the instance list to finish setup
+              {template.windows ? "; Windows signs in the user shown there and turns on Remote Desktop." : "."}
+            </p>
+          )}
         </Card>
 
         <Card title="2 · Size">
@@ -233,32 +271,59 @@ function Picker<T extends number>({ label, options, value, fmt, onChange }: { la
   );
 }
 
-/** SSH command and password for a guest, when the node's hypervisor exposes one. */
+/** How to reach a guest: SSH for cloud images; screen and Remote Desktop for ISO installs. */
 function AccessLine({ instance }: { instance: Instance }) {
   const [access, setAccess] = useState<GuestAccess | null>(null);
   const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     commands.getInstanceAccess(instance.id).then(setAccess, () => setAccess(null));
   }, [instance.id, instance.state]);
   if (!access) return null;
-  const cmd = `ssh -p ${access.sshPort} ${access.user}@${access.sshHost}`;
+  const cmd = access.windows
+    ? `${access.rdp ?? ""}`
+    : `ssh -p ${access.sshPort} ${access.user ? `${access.user}@` : ""}${access.sshHost}`;
   const copy = () => {
     void navigator.clipboard?.writeText(cmd).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     });
   };
+  const openScreen = () => {
+    setError(null);
+    commands.openGuestScreen(instance.id).catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+  };
   return (
     <div className="mt-1 flex flex-wrap items-center gap-x-2 text-xs">
+      {access.windows && <span className="text-slate-400">Remote Desktop</span>}
       <button type="button" onClick={copy} className="font-mono text-cyan-300 hover:underline" title="Copy">
         {cmd}
       </button>
       {copied && <span className="text-emerald-400">copied</span>}
+      {access.windows && access.user && (
+        <span className="text-slate-400">
+          user <span className="font-mono text-slate-200">{access.user}</span>
+        </span>
+      )}
       {access.password && (
         <span className="text-slate-400">
           password <span className="font-mono text-slate-200">{access.password}</span>
         </span>
       )}
+      {!access.user && <span className="text-slate-400">login is set during installation</span>}
+      {access.display && (
+        <>
+          <button type="button" onClick={openScreen} className="text-amber-300 hover:underline" title={access.display}>
+            Open screen
+          </button>
+          {access.displayPassword && (
+            <span className="text-slate-400">
+              screen password <span className="font-mono text-slate-200">{access.displayPassword}</span>
+            </span>
+          )}
+        </>
+      )}
+      {error && <span className="text-rose-400">{error}</span>}
     </div>
   );
 }

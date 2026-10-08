@@ -128,4 +128,20 @@ describe("browser mock bridge", () => {
     expect(after.downloads).toEqual({});
     await expect(call(m, "pull_image", { name: "windows-11" })).rejects.toMatchObject({ code: "not_found" });
   });
+
+  it("imports a Windows ISO and gives its guests a screen and Remote Desktop", async () => {
+    const m = await freshMock();
+    type Imgs = { installed: { name: string; kind: string; iso?: { windows: boolean } }[]; downloads: Record<string, { import?: boolean }> };
+    const name = await call<string>(m, "import_image");
+    expect((await call<Imgs>(m, "list_images")).downloads[name]).toMatchObject({ import: true });
+    await vi.advanceTimersByTimeAsync(1500);
+    const iso = (await call<Imgs>(m, "list_images")).installed.find((i) => i.name === name);
+    expect(iso).toMatchObject({ kind: "iso", iso: { windows: true } });
+
+    const inst = await call<Instance>(m, "deploy_instance", { request: { offerId: "fra-cpu-1", spec: { ...spec, image: name } } });
+    const access = await call<Record<string, unknown>>(m, "get_instance_access", { id: inst.id });
+    expect(access).toMatchObject({ windows: true, user: "peervps", display: "vnc://127.0.0.1:5900" });
+    expect(access.rdp).toMatch(/^127\.0\.0\.1:\d+$/);
+    await expect(call(m, "open_guest_screen", { id: inst.id })).resolves.toBeNull();
+  });
 });

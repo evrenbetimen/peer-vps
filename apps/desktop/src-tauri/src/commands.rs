@@ -207,6 +207,22 @@ pub async fn get_instance_access(state: State<'_, AppState>, id: String) -> CmdR
     Ok(state.node.access(&state.renter, &id).await?)
 }
 
+/// Open the guest's screen (the installer of an ISO guest) in the system VNC viewer.
+#[tauri::command]
+pub async fn open_guest_screen(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let access = state.node.access(&state.renter, &id).await?;
+    let url = access
+        .and_then(|a| a.display)
+        // Only ever hand the OS a loopback VNC address, whatever the backend reports.
+        .filter(|u| u.starts_with("vnc://127.0.0.1:"))
+        .ok_or_else(|| peervps_core::Error::NotFound(format!("instance {id} has no screen")))?;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| peervps_core::Error::Unsupported(format!("no VNC viewer to open the screen: {e}")))?;
+    Ok(())
+}
+
 /// Last 64 KiB of the guest's serial console.
 #[tauri::command]
 pub async fn get_console(state: State<'_, AppState>, id: String) -> CmdResult<Option<String>> {

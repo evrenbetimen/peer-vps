@@ -11,6 +11,7 @@ fn cfg(root: &Path) -> QemuConfig {
         arch: Arch::X86_64,
         accel: Accel::Tcg,
         firmware: None,
+        uefi: None,
         images_dir: root.join("images"),
         run_dir: root.join("run"),
         user: DEFAULT_USER.into(),
@@ -19,7 +20,14 @@ fn cfg(root: &Path) -> QemuConfig {
 }
 
 fn launch() -> Launch {
-    Launch { vcpus: 2, mem_mib: 1024, image: "ubuntu-24.04".into(), ssh_port: 2222, password: "pw".into() }
+    Launch {
+        vcpus: 2,
+        mem_mib: 1024,
+        image: "ubuntu-24.04".into(),
+        ssh_port: 2222,
+        password: "pw".into(),
+        installer: None,
+    }
 }
 
 fn joined(args: &[OsString]) -> String {
@@ -58,6 +66,75 @@ fn command_line_wires_disk_network_console_and_seed() {
     assert!(
         joined(&command_line(&win, &dir, &launch(), 1, &extra)).contains("-accel whpx,kernel-irqchip=off -cpu max")
     );
+}
+
+fn windows_launch(root: &Path) -> Launch {
+    Launch {
+        mem_mib: 4096,
+        image: "win11".into(),
+        password: "abcdefgh12345678".into(),
+        installer: Some(Installer {
+            iso: root.join("images/win11.iso"),
+            windows: true,
+            vnc_port: 5903,
+            rdp_port: Some(3390),
+            drivers: Some(root.join("images/virtio-win.iso")),
+        }),
+        ..launch()
+    }
+}
+
+#[test]
+fn windows_installs_get_in_box_devices_a_screen_and_answers() {
+    let root = PathBuf::from("/srv/pv");
+    let dir = root.join("run/vm");
+    let none = Extra { seed_url: None, incoming: false };
+    let mut x86 = cfg(&root);
+    x86.uefi =
+        Some(Uefi { code: "/usr/share/OVMF/OVMF_CODE_4M.fd".into(), vars: "/usr/share/OVMF/OVMF_VARS_4M.fd".into() });
+    let cmd = joined(&command_line(&x86, &dir, &windows_launch(&root), 1, &none));
+    for want in [
+        "-machine q35 ",
+        "nvme,drive=disk0,serial=peervps0,bootindex=1",
+        "hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:3390-:3389",
+        "-device e1000e,netdev=n0",
+        "-device VGA,vgamem_mb=64",
+        "-vnc 127.0.0.1:3,password=on",
+        "file=/srv/pv/images/win11.iso",
+        "ide-cd,drive=cd0,bus=ide.0,bootindex=0",
+        "driver=vvfat,node-name=unattend,dir=/srv/pv/run/vm/unattend",
+        "ide-cd,drive=cd1,bus=ide.1",
+        "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "if=pflash,format=raw,unit=1,file=/srv/pv/run/vm/efivars.fd",
+    ] {
+        let want = want.replace('/', std::path::MAIN_SEPARATOR_STR);
+        assert!(cmd.contains(&want), "missing {want}: {cmd}");
+    }
+    assert!(!cmd.contains("if=virtio,file") && !cmd.contains("-smbios"));
+
+    let mut arm = cfg(&root);
+    arm.arch = Arch::Aarch64;
+    arm.accel = Accel::Hvf;
+    arm.firmware = Some("/opt/homebrew/share/qemu/edk2-aarch64-code.fd".into());
+    let cmd = joined(&command_line(&arm, &dir, &windows_launch(&root), 1, &none));
+    for want in [
+        "-machine virt,gic-version=3 -accel hvf -cpu host",
+        "-device ramfb",
+        "usb-storage,drive=cd0,removable=on,bootindex=0",
+        "virtio-net-pci,netdev=n0",
+        "-bios ",
+    ] {
+        assert!(cmd.contains(want), "missing {want}: {cmd}");
+    }
+    assert!(!cmd.contains("pflash") && !cmd.contains("ide-cd"));
+
+    // A Linux installer keeps virtio devices and gets no answer file or RDP.
+    let mut linux = windows_launch(&root);
+    let i = linux.installer.as_mut().expect("installer");
+    (i.windows, i.rdp_port, i.drivers) = (false, None, None);
+    let cmd = joined(&command_line(&x86, &dir, &linux, 1, &none));
+    assert!(cmd.contains("if=virtio,file=") && cmd.contains("virtio-net-pci") && cmd.contains("-vnc "));
+    assert!(!cmd.contains("vvfat") && !cmd.contains("3389") && !cmd.contains("pflash"));
 }
 
 #[test]
@@ -151,5 +228,79 @@ async fn lifecycle_against_real_qemu() {
     missing.image = "nope".into();
     let err = hv.create(VmId::new(), &missing, &placement).await.expect_err("missing image");
     assert!(matches!(err, Error::NotFound(_)), "{err}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+fn real_qemu(root: &Path) -> Option<QemuHypervisor> {
+    let cfg = match QemuConfig::detect(root.join("images"), root.join("run")) {
+        Ok(mut c) => {
+            c.accel = Accel::Tcg;
+            c
+        }
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return None;
+        }
+    };
+    if cfg.arch == Arch::Aarch64 && cfg.firmware.is_none() {
+        eprintln!("skipping: no aarch64 firmware");
+        return None;
+    }
+    Some(QemuHypervisor::new(cfg).expect("hypervisor"))
+}
+
+/// Real QEMU, TCG, a Windows-labelled ISO with no OS on it: the installer
+/// devices, answer-file stick and password-protected screen all come up.
+#[tokio::test]
+async fn windows_iso_install_boots_with_a_locked_screen() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let root = std::env::temp_dir().join(format!("pvqi-{}", uuid::Uuid::new_v4().simple()));
+    let Some(hv) = real_qemu(&root) else { return };
+    let arch_label = if hv.cfg.arch == Arch::X86_64 { "CCCOMA_X64FRE_EN-US_DV9" } else { "CPBA_A64FRE_EN-US_DV9" };
+    images::tests::fake_iso(&images::iso_path(&hv.cfg.images_dir, "win11"), arch_label);
+
+    let spec =
+        VmSpec { vcpus: 1, mem_mib: 4096, disk_gib: 64, image: "win11".into(), accelerator: None, confidential: false };
+    let placement = Placement { pinned_cores: vec![0], mem_mib: 4096, disk_gib: 64, accelerator: None };
+    let small = Placement { mem_mib: 2048, ..placement.clone() };
+    let err = hv.create(VmId::new(), &spec, &small).await.expect_err("too little memory");
+    assert!(err.to_string().contains("4096 MiB"), "{err}");
+
+    let id = VmId::new();
+    hv.create(id, &spec, &placement).await.expect("create");
+    let xml = std::fs::read_to_string(hv.vm_dir(id).join("unattend/autounattend.xml")).expect("answer file");
+    assert!(xml.contains("BypassTPMCheck"));
+    hv.start(id).await.expect("start");
+
+    let access = hv.access(id).await.expect("access").expect("some");
+    assert!(access.windows && access.rdp.is_some());
+    let (user, password) = (access.user.clone(), access.password.clone().expect("password"));
+    assert_eq!(user, "peervps");
+    assert!(xml.contains(&format!("<Value>{password}</Value>")), "the answer file creates the advertised login");
+    let display = access.display.expect("display");
+    let port: u16 = display.rsplit(':').next().and_then(|p| p.parse().ok()).expect("port");
+    assert_eq!(access.display_password.as_deref(), Some(&password[..8]));
+
+    // RFB handshake: the server must offer only VNC authentication (type 2).
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.expect("vnc");
+    let mut version = [0u8; 12];
+    s.read_exact(&mut version).await.expect("version");
+    assert!(version.starts_with(b"RFB 003."), "{version:?}");
+    s.write_all(b"RFB 003.008\n").await.expect("write");
+    let n = s.read_u8().await.expect("count") as usize;
+    let mut types = vec![0u8; n];
+    s.read_exact(&mut types).await.expect("types");
+    assert_eq!(types, vec![2], "password required");
+
+    let err = hv.snapshot(id).await.expect_err("no scale-to-zero yet");
+    assert!(matches!(err, Error::Unsupported(_)), "{err}");
+    hv.destroy(id).await.expect("destroy");
+
+    // An installer for the other architecture is refused with a pointer to the right one.
+    let other = if hv.cfg.arch == Arch::X86_64 { "CPBA_A64FRE_EN-US_DV9" } else { "CCCOMA_X64FRE_EN-US_DV9" };
+    images::tests::fake_iso(&images::iso_path(&hv.cfg.images_dir, "win-other"), other);
+    let wrong = VmSpec { image: "win-other".into(), ..spec };
+    let err = hv.create(VmId::new(), &wrong, &placement).await.expect_err("wrong arch");
+    assert!(matches!(err, Error::Unsupported(_)) && err.to_string().contains("Windows"), "{err}");
     let _ = std::fs::remove_dir_all(root);
 }
