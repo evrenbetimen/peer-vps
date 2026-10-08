@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { commands } from "../bridge/commands";
-import type { PeerInfo, PeerOverview, PeerStatus } from "../bridge/types";
-import { Button, Card, ErrorNote } from "./ui";
+import type { InternetStatus, PeerInfo, PeerOverview, PeerStatus } from "../bridge/types";
+import { Button, Card, ErrorNote, Toggle } from "./ui";
 import { cx } from "../lib/format";
 
 const STATUS: Record<PeerStatus, { label: string; tone: string }> = {
@@ -54,9 +54,9 @@ export function Peers() {
       setAddress("");
     });
 
-  const copyInvite = () => {
-    if (!view?.invite) return;
-    void navigator.clipboard?.writeText(view.invite).then(() => {
+  const copy = (text: string | null) => {
+    if (!text) return;
+    void navigator.clipboard?.writeText(text).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     });
@@ -70,9 +70,9 @@ export function Peers() {
     <Card title={`Peers · ${others.length}`}>
       <div className="space-y-3 text-sm">
         <div>
-          <div className="text-xs text-slate-400">Give this to another PeerVPS so it can add this machine</div>
+          <div className="text-xs text-slate-400">Give this to another PeerVPS on this network so it can add this machine</div>
           {view.invite ? (
-            <button type="button" onClick={copyInvite} className="font-mono text-cyan-300 hover:underline" title="Copy">
+            <button type="button" onClick={() => copy(view.invite)} className="font-mono text-cyan-300 hover:underline" title="Copy">
               {view.invite}
             </button>
           ) : (
@@ -80,6 +80,31 @@ export function Peers() {
           )}
           {copied && <span className="ml-2 text-xs text-emerald-400">copied</span>}
         </div>
+
+        <div className="space-y-1">
+          <Toggle
+            label="Reachable from other networks"
+            checked={view.internet.state !== "off"}
+            onChange={(on) => void run(() => commands.setInternet(on))}
+          />
+          <InternetLine status={view.internet} invite={view.internetInvite} onCopy={() => copy(view.internetInvite)} />
+        </div>
+
+        {view.nearby.length > 0 && (
+          <div>
+            <div className="text-xs text-slate-400">On this network</div>
+            <ul>
+              {view.nearby.map((n) => (
+                <li key={n.id} className="flex items-center justify-between gap-2 py-1" data-testid={`nearby-${n.id}`}>
+                  <span className="font-mono">{n.id}</span>
+                  <Button variant="ghost" disabled={busy} onClick={() => void run(() => commands.addPeer(n.invite))}>
+                    Add
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         <form
           className="flex gap-2"
@@ -127,6 +152,26 @@ export function Peers() {
       </div>
     </Card>
   );
+}
+
+function InternetLine({ status, invite, onCopy }: { status: InternetStatus; invite: string | null; onCopy: () => void }) {
+  switch (status.state) {
+    case "off":
+      return <p className="text-xs text-slate-500">Off: only machines on this network can add this one. Turning it on asks the router (UPnP) to forward a port here.</p>;
+    case "checking":
+      return <p className="text-xs text-slate-400">Asking the router…</p>;
+    case "open":
+      return (
+        <div className="text-xs">
+          <span className="text-slate-400">Give this to machines on other networks: </span>
+          <button type="button" onClick={onCopy} className="font-mono text-cyan-300 hover:underline" title="Copy">
+            {invite}
+          </button>
+        </div>
+      );
+    default:
+      return <p className="text-xs text-amber-300">{status.detail ?? "Not reachable from other networks."}</p>;
+  }
 }
 
 function PeerRow({ peer, busy, onRemove }: { peer: PeerInfo; busy: boolean; onRemove: () => void }) {

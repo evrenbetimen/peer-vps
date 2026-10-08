@@ -8,6 +8,8 @@ import type {
   HostSnapshot,
   Images,
   Instance,
+  InternetStatus,
+  NearbyPeer,
   NodeEvent,
   Offer,
   OfferQuery,
@@ -31,6 +33,8 @@ const peers: PeerInfo[] = [
   { id: "pv-3f9c1a7e2b4d6c80", publicKey: "3f9c1a7e2b4d6c80".padEnd(64, "0"), address: "192.168.1.20:7071", trusted: true, status: "online", offers: [remoteOffer()], lastSeen: Math.floor(Date.now() / 1000), error: null },
   { id: "pv-a17b0c55e9d24f13", publicKey: "a17b0c55e9d24f13".padEnd(64, "0"), address: "192.168.1.31:7071", trusted: false, status: "pending", offers: [], lastSeen: Math.floor(Date.now() / 1000), error: null },
 ];
+let internet: InternetStatus = { state: "off", address: null, detail: null };
+const nearby: NearbyPeer[] = [{ id: "pv-b2e4f6a8c0d1e3f5", invite: "pv-b2e4f6a8c0d1e3f5@192.168.1.44:7071", lastSeen: Math.floor(Date.now() / 1000) }];
 /** Peers' offers as the node lists them: `<peer>/<offer>`, provided by the peer. */
 function peerOffers(): Offer[] {
   return peers.filter((p) => p.status === "online").flatMap((p) => p.offers.map((o) => ({ ...o, id: `${p.id}/${o.id}`, provider: p.id, region: `${o.region} via ${p.id}` })));
@@ -204,7 +208,25 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         return null;
       }
       case "get_peers":
-        return { id: ME, listen: "0.0.0.0:7071", invite: `${ME}@192.168.1.10:7071`, peers } satisfies PeerOverview;
+        return {
+          id: ME,
+          listen: "0.0.0.0:7071",
+          invite: `${ME}@192.168.1.10:7071`,
+          internetInvite: internet.address ? `${ME}@${internet.address}` : null,
+          internet,
+          nearby: nearby.filter((n) => !peers.some((p) => p.id === n.id)),
+          peers,
+        } satisfies PeerOverview;
+      case "set_internet":
+        if (!args.enabled) {
+          internet = { state: "off", address: null, detail: null };
+        } else {
+          internet = { state: "checking", address: null, detail: null };
+          setTimeout(() => {
+            if (internet.state === "checking") internet = { state: "open", address: "203.0.113.7:7071", detail: "the router forwards TCP 7071 to 192.168.1.10:7071" };
+          }, 300);
+        }
+        return internet;
       case "add_peer": {
         const address = String(args.address ?? "").trim();
         const [want, addr] = address.includes("@") ? address.split("@", 2) : [null, address];

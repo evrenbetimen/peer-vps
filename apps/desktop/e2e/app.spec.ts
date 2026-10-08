@@ -153,3 +153,10 @@ test("peers: approve a machine that asked and rent another machine's offer", asy
   await page.getByRole("button", { name: "Deploy" }).click();
   await expect(page.getByText(/on pv-3f9c1a7e2b4d6c80/)).toBeVisible();
 });
+
+test("peers: a machine on the network is one click away and the router port can be opened", async ({ page }) => {
+  await page.getByTestId("nearby-pv-b2e4f6a8c0d1e3f5").getByRole("button", { name: "Add" }).click();
+  await expect(page.getByTestId("peer-pv-b2e4f6a8c0d1e3f5")).toContainText("waiting for their approval");
+  await page.getByRole("switch", { name: /Reachable from other networks/ }).click();
+  await expect(page.getByText("pv-5c0ffee15ea1ab1e@203.0.113.7:7071")).toBeVisible();
+});

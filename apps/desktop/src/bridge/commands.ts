@@ -12,6 +12,7 @@ import type {
   HostAllocation,
   HostSnapshot,
   Images,
+  InternetStatus,
   Instance,
   Offer,
   OfferQuery,
@@ -66,4 +67,6 @@ export const commands = {
   addPeer: (address: string) => call<PeerInfo>("add_peer", { address }),
   approvePeer: (id: string) => call<PeerInfo>("approve_peer", { id }),
   removePeer: (id: string) => call<void>("remove_peer", { id }),
+  /** Ask the router (UPnP) to forward a port so other networks can add this machine. */
+  setInternet: (enabled: boolean) => call<InternetStatus>("set_internet", { enabled }),
 };

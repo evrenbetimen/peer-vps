@@ -61,6 +61,10 @@ async fn start_peering(node: &Node, data_dir: &std::path::Path) -> peervps_core:
         tracing::warn!(error = %e, "port {DEFAULT_PORT} is taken; accepting peers on a free port");
         peers.listen((any, 0).into()).await?;
     }
+    let (beacons, targets) = peervps_core::peer::discovery::lan();
+    if let Err(e) = peers.discover(beacons, targets).await {
+        tracing::warn!(error = %e, "not announcing this machine on the LAN");
+    }
     peers.spawn_refresh(std::time::Duration::from_secs(10));
     Ok(())
 }
@@ -138,6 +142,7 @@ pub fn run() {
             commands::add_peer,
             commands::approve_peer,
             commands::remove_peer,
+            commands::set_internet,
             images::list_images,
             images::pull_image,
             images::import_image,

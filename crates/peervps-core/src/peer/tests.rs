@@ -227,3 +227,44 @@ async fn identity_and_trusted_peers_survive_a_restart() {
     assert!(p.trusted && p.address.as_deref() == Some(addr.as_str()));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn finds_machines_on_the_lan_and_opens_the_router_port() {
+    let (_, _, a) = node_with(Arc::new(MockHypervisor::default())).await;
+    let (_, _, b) = node_with(Arc::new(MockHypervisor::default())).await;
+    let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe");
+    let beacons: SocketAddr = probe.local_addr().expect("addr");
+    drop(probe);
+    b.discover(beacons, vec![beacons]).await.expect("b listens");
+    a.discover("127.0.0.1:0".parse().expect("addr"), vec![beacons]).await.expect("a announces");
+    let a_addr = a.overview().await.listen.expect("listening");
+    let mut nearby = Vec::new();
+    for _ in 0..40 {
+        nearby = b.overview().await.nearby;
+        if !nearby.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(nearby.len(), 1, "{nearby:?}");
+    assert_eq!(nearby[0].invite, format!("{}@{a_addr}", a.id()));
+    b.add(&nearby[0].invite).await.expect("add from the nearby list");
+    assert!(b.overview().await.nearby.is_empty(), "peers are not listed as nearby");
+
+    let (igd, _) = super::nat::tests::fake_router("203.0.113.7", vec![], false).await;
+    a.set_nat_config(NatConfig { igd: Some(igd), stun: vec![] });
+    assert_eq!(a.set_internet(true).await.expect("on").state, InternetState::Checking);
+    let mut view = a.overview().await;
+    for _ in 0..40 {
+        if view.internet.state != InternetState::Checking {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        view = a.overview().await;
+    }
+    assert_eq!(view.internet.state, InternetState::Open, "{:?}", view.internet);
+    let port = a_addr.rsplit_once(':').expect("port").1;
+    assert_eq!(view.internet_invite, Some(format!("{}@203.0.113.7:{port}", a.id())));
+    assert_eq!(a.set_internet(false).await.expect("off").state, InternetState::Off);
+    assert_eq!(a.overview().await.internet_invite, None);
+}

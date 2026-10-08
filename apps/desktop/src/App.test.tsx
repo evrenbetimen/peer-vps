@@ -123,4 +123,17 @@ describe("App", () => {
     await user.click(deploy);
     expect(await screen.findByText(/on pv-3f9c1a7e2b4d6c80/)).toBeInTheDocument();
   });
+
+  it("adds a machine found on the network and opens a port for other networks", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const near = await screen.findByTestId("nearby-pv-b2e4f6a8c0d1e3f5");
+    await user.click(within(near).getByRole("button", { name: "Add" }));
+    expect(await within(await screen.findByTestId("peer-pv-b2e4f6a8c0d1e3f5")).findByText("waiting for their approval")).toBeInTheDocument();
+    expect(screen.queryByTestId("nearby-pv-b2e4f6a8c0d1e3f5")).not.toBeInTheDocument();
+
+    expect(screen.getByText(/only machines on this network can add this one/)).toBeInTheDocument();
+    await user.click(screen.getByRole("switch", { name: /Reachable from other networks/ }));
+    expect(await screen.findByText("pv-5c0ffee15ea1ab1e@203.0.113.7:7071", {}, { timeout: 5000 })).toBeInTheDocument();
+  });
 });

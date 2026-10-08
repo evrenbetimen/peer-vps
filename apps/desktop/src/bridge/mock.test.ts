@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Batch, Instance, Offer, PeerInfo, PeerOverview, Topology } from "./types";
+import type { Batch, InternetStatus, Instance, Offer, PeerInfo, PeerOverview, Topology } from "./types";
 
 // The mock keeps module-level state, so every test gets a fresh copy.
 async function freshMock() {
@@ -168,5 +168,17 @@ describe("browser mock bridge", () => {
     await expect(call(m, "remove_peer", { id: added.id })).rejects.toMatchObject({ code: "not_found" });
     await expect(call(m, "approve_peer", { id: "pv-nope" })).rejects.toMatchObject({ code: "not_found" });
     expect((await call<PeerOverview>(m, "get_peers")).peers.map((p) => p.id)).not.toContain(added.id);
+  });
+
+  it("turns internet reachability on and off", async () => {
+    const m = await freshMock();
+    expect((await call<PeerOverview>(m, "get_peers")).internet.state).toBe("off");
+    expect((await call<InternetStatus>(m, "set_internet", { enabled: true })).state).toBe("checking");
+    await vi.advanceTimersByTimeAsync(400);
+    const on = await call<PeerOverview>(m, "get_peers");
+    expect(on.internet.state).toBe("open");
+    expect(on.internetInvite).toBe(`${on.id}@203.0.113.7:7071`);
+    expect((await call<InternetStatus>(m, "set_internet", { enabled: false })).state).toBe("off");
+    expect((await call<PeerOverview>(m, "get_peers")).internetInvite).toBeNull();
   });
 });

@@ -6,6 +6,7 @@ use peervps_core::api::market::{Offer, OfferQuery};
 use peervps_core::billing::CollateralState;
 use peervps_core::billing::payments::{self, WebhookOutcome};
 use peervps_core::node::{AccountSummary, DeployRequest, Instance};
+use peervps_core::peer::nat::InternetStatus;
 use peervps_core::peer::{PeerInfo, PeerOverview, Peers};
 use peervps_core::storage::now_secs;
 use peervps_core::virtualization::accel::AcceleratorKind;
@@ -256,4 +257,10 @@ pub async fn approve_peer(state: State<'_, AppState>, id: String) -> CmdResult<P
 #[tauri::command]
 pub async fn remove_peer(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     Ok(peers(&state)?.remove(&id).await?)
+}
+
+/// Ask the router to forward a port so machines on other networks can add this one.
+#[tauri::command]
+pub async fn set_internet(state: State<'_, AppState>, enabled: bool) -> CmdResult<InternetStatus> {
+    Ok(peers(&state)?.set_internet(enabled).await?)
 }

@@ -22,6 +22,8 @@
 //! one-time welcome credit and bills it per second in its own ledger.
 
 pub mod channel;
+pub mod discovery;
+pub mod nat;
 pub mod proto;
 
 use std::collections::HashMap;
@@ -44,6 +46,8 @@ use crate::storage::now_secs;
 use crate::virtualization::GuestAccess;
 use crate::{Error, Result};
 use channel::Channel;
+use discovery::{Nearby, NearbyPeer};
+use nat::{InternetState, InternetStatus, NatConfig};
 use proto::{GuestPort, Request, Response};
 
 /// Port `peervps serve --peer-listen` and the desktop app use unless told otherwise.
@@ -154,6 +158,11 @@ pub struct PeerOverview {
     pub listen: Option<String>,
     /// What to give someone so they can add this node: `pv-…@<LAN address>:<port>`.
     pub invite: Option<String>,
+    /// The same for other networks, when the router forwards a port to us.
+    pub internet_invite: Option<String>,
+    pub internet: InternetStatus,
+    /// Machines announcing themselves on this network that are not peers yet.
+    pub nearby: Vec<NearbyPeer>,
     pub peers: Vec<PeerInfo>,
 }
 
@@ -183,6 +192,23 @@ struct Inner {
     peers: RwLock<HashMap<String, PeerInfo>>,
     listen: std::sync::Mutex<Option<SocketAddr>>,
     forwards: Mutex<HashMap<(String, GuestPort), Forward>>,
+    nearby: Nearby,
+    nat: std::sync::Mutex<NatConfig>,
+    internet: std::sync::Mutex<InternetStatus>,
+    /// Keeps the router's port forward alive; aborting it stops renewing.
+    internet_task: Mutex<Option<JoinHandle<()>>>,
+    discovery_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Settings {
+    /// Ask the router to forward a port so other networks can connect.
+    #[serde(default)]
+    internet: bool,
+}
+
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Peers {
@@ -221,6 +247,11 @@ impl Peers {
                 peers: RwLock::new(peers),
                 listen: std::sync::Mutex::new(None),
                 forwards: Mutex::new(HashMap::new()),
+                nearby: Nearby::default(),
+                nat: std::sync::Mutex::new(NatConfig::default()),
+                internet: std::sync::Mutex::new(InternetStatus::off()),
+                internet_task: Mutex::new(None),
+                discovery_task: Mutex::new(None),
             }),
         };
         node.attach_peers(me.clone())?;
@@ -232,14 +263,101 @@ impl Peers {
     }
 
     fn listen_addr(&self) -> Option<SocketAddr> {
-        *self.inner.listen.lock().unwrap_or_else(|e| e.into_inner())
+        *lock(&self.inner.listen)
+    }
+
+    /// Where the router and the outside view are looked up (tests use fakes).
+    pub fn set_nat_config(&self, cfg: NatConfig) {
+        *lock(&self.inner.nat) = cfg;
+    }
+
+    fn settings_file(&self) -> Option<PathBuf> {
+        self.inner.file.as_ref().map(|f| f.with_file_name("peering.json"))
+    }
+
+    fn settings(&self) -> Settings {
+        self.settings_file()
+            .and_then(|f| std::fs::read(f).ok())
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    /// Announce this node on the LAN and collect the machines announcing
+    /// themselves (see [`discovery`]). Needs [`Self::listen`] first.
+    pub async fn discover(&self, listen: SocketAddr, targets: Vec<SocketAddr>) -> Result<()> {
+        let port = self.listen_addr().ok_or_else(|| Error::Invalid("accept peers before announcing".into()))?.port();
+        let task = discovery::run(
+            self.inner.nearby.clone(),
+            self.id().to_owned(),
+            self.inner.identity.keypair.public.clone(),
+            port,
+            listen,
+            targets,
+        )
+        .await?;
+        if let Some(old) = self.inner.discovery_task.lock().await.replace(task) {
+            old.abort();
+        }
+        Ok(())
+    }
+
+    pub fn internet(&self) -> InternetStatus {
+        lock(&self.inner.internet).clone()
+    }
+
+    /// Ask the router to forward a port to us (or stop), and remember the choice.
+    /// Returns at once with `checking`; [`Self::internet`] has the outcome.
+    pub async fn set_internet(&self, enabled: bool) -> Result<InternetStatus> {
+        if let Some(path) = self.settings_file() {
+            tokio::fs::write(&path, serde_json::to_vec_pretty(&Settings { internet: enabled })?).await?;
+        }
+        let mut task = self.inner.internet_task.lock().await;
+        if let Some(old) = task.take() {
+            old.abort();
+        }
+        if !enabled {
+            *lock(&self.inner.internet) = InternetStatus::off();
+            return Ok(self.internet());
+        }
+        let port =
+            self.listen_addr().ok_or_else(|| Error::Invalid("accept peers before opening a port".into()))?.port();
+        *lock(&self.inner.internet) = InternetStatus { state: InternetState::Checking, address: None, detail: None };
+        let me = self.clone();
+        *task = Some(tokio::spawn(async move { me.keep_internet(port).await }));
+        Ok(self.internet())
+    }
+
+    async fn keep_internet(&self, port: u16) {
+        let cfg = lock(&self.inner.nat).clone();
+        let (status, mapping) = nat::open(&cfg, lan_ip(), port).await;
+        tracing::info!(state = ?status.state, address = ?status.address, detail = ?status.detail, "internet reachability");
+        *lock(&self.inner.internet) = status;
+        let Some(m) = mapping else { return };
+        // Dropped (aborted) when the person turns it off: take the forward back then.
+        struct Unmap(Option<nat::Mapping>);
+        impl Drop for Unmap {
+            fn drop(&mut self) {
+                if let Some(m) = self.0.take() {
+                    tokio::spawn(async move {
+                        let _ = m.gateway.unmap(m.external_port).await;
+                    });
+                }
+            }
+        }
+        let _unmap_on_abort = Unmap(Some(m.clone()));
+        loop {
+            tokio::time::sleep(nat::RENEW_EVERY).await;
+            if let Err(e) = m.gateway.map(m.external_port, m.internal).await {
+                tracing::warn!(error = %e, "renewing the router's port forward failed");
+            }
+        }
     }
 
     /// Accept peers on `addr`; returns the bound address (useful with port 0).
     pub async fn listen(&self, addr: SocketAddr) -> Result<SocketAddr> {
         let listener = TcpListener::bind(addr).await?;
         let bound = listener.local_addr()?;
-        *self.inner.listen.lock().unwrap_or_else(|e| e.into_inner()) = Some(bound);
+        *lock(&self.inner.listen) = Some(bound);
         tracing::info!(%bound, id = %self.id(), "accepting peers");
         let me = self.clone();
         tokio::spawn(async move {
@@ -260,6 +378,9 @@ impl Peers {
                 }
             }
         });
+        if self.settings().internet {
+            self.set_internet(true).await?;
+        }
         Ok(bound)
     }
 
@@ -277,6 +398,10 @@ impl Peers {
     pub async fn overview(&self) -> PeerOverview {
         let mut peers: Vec<PeerInfo> = self.inner.peers.read().await.values().cloned().collect();
         peers.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut nearby = self.inner.nearby.list().await;
+        nearby.retain(|n| !peers.iter().any(|p| p.id == n.id));
+        let internet = self.internet();
+        let internet_invite = internet.address.as_ref().map(|a| format!("{}@{a}", self.id()));
         let listen = self.listen_addr();
         PeerOverview {
             id: self.id().to_owned(),
@@ -285,6 +410,9 @@ impl Peers {
                 let ip = if a.ip().is_unspecified() { lan_ip().unwrap_or(a.ip()) } else { a.ip() };
                 format!("{}@{}", self.id(), SocketAddr::new(ip, a.port()))
             }),
+            internet_invite,
+            internet,
+            nearby,
             peers,
         }
     }

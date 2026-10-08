@@ -22,6 +22,7 @@
 //! | POST   | `/v1/peers`                    | `{"address":"pv-…@host:port"}`       |
 //! | POST   | `/v1/peers/{id}/approve`       | let a pending peer rent here         |
 //! | DELETE | `/v1/peers/{id}`               | forget a peer                        |
+//! | PUT    | `/v1/peers/internet`           | `{"enabled":true}`: UPnP port forward |
 //! | POST   | `/v1/webhooks/{gateway}`       | signed payment top-ups (no bearer)   |
 
 pub mod market;
@@ -109,6 +110,7 @@ pub fn router(node: Node) -> Router {
         .route("/v1/instances/{id}/access", get(access))
         .route("/v1/account", get(account))
         .route("/v1/peers", get(list_peers).post(add_peer))
+        .route("/v1/peers/internet", axum::routing::put(set_internet))
         .route("/v1/peers/{id}", axum::routing::delete(remove_peer))
         .route("/v1/peers/{id}/approve", post(approve_peer))
         .route("/v1/webhooks/{gateway}", post(webhook))
@@ -218,6 +220,19 @@ struct AddPeer {
 
 async fn add_peer(State(node): State<Node>, Caller(_): Caller, Json(req): Json<AddPeer>) -> ApiResult<PeerInfo> {
     Ok(Json(peers(&node)?.add(&req.address).await?))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetInternet {
+    enabled: bool,
+}
+
+async fn set_internet(
+    State(node): State<Node>,
+    Caller(_): Caller,
+    Json(req): Json<SetInternet>,
+) -> ApiResult<crate::peer::nat::InternetStatus> {
+    Ok(Json(peers(&node)?.set_internet(req.enabled).await?))
 }
 
 async fn approve_peer(State(node): State<Node>, Caller(_): Caller, Path(id): Path<String>) -> ApiResult<PeerInfo> {

@@ -247,12 +247,33 @@ export interface PeerInfo {
   error: string | null;
 }
 
+export type InternetState = "off" | "checking" | "open" | "noGateway" | "carrierNat" | "failed";
+
+export interface InternetStatus {
+  state: InternetState;
+  /** `ip:port` other networks reach this machine on, when open. */
+  address: string | null;
+  detail: string | null;
+}
+
+export interface NearbyPeer {
+  id: string;
+  /** `pv-…@ip:port`, ready to add. */
+  invite: string;
+  lastSeen: number;
+}
+
 export interface PeerOverview {
   /** This machine's peer id. */
   id: string;
   listen: string | null;
-  /** What another machine pastes to add this one: `pv-…@host:port`. */
+  /** What another machine on this network pastes to add this one: `pv-…@host:port`. */
   invite: string | null;
+  /** The same for other networks, when the router forwards a port. */
+  internetInvite: string | null;
+  internet: InternetStatus;
+  /** PeerVPS machines announcing themselves on this network that are not peers yet. */
+  nearby: NearbyPeer[];
   peers: PeerInfo[];
 }
 

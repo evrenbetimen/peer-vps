@@ -104,6 +104,11 @@ enum PeerCmd {
     Approve { id: String },
     /// Forget a peer.
     Remove { id: String },
+    /// Ask the router (UPnP) to forward a port so machines on other networks can add this one.
+    Internet {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -114,6 +119,12 @@ struct PeerArgs {
     /// Peer to add on start (`pv-…@host:port`); repeatable.
     #[arg(long = "peer")]
     peers: Vec<String>,
+    /// Ask the router (UPnP) to forward a port so other networks can reach this node.
+    #[arg(long)]
+    upnp: bool,
+    /// Do not announce this node to, or look for, PeerVPS machines on the LAN.
+    #[arg(long)]
+    no_discovery: bool,
     /// Where the node key and the peer list live; defaults to the data dir.
     #[arg(long)]
     state_dir: Option<PathBuf>,
@@ -362,6 +373,9 @@ async fn main() -> Result<()> {
             client.post(&format!("/v1/peers/{id}/approve"), json!({})).await?
         }
         Cmd::Peer { cmd: PeerCmd::Remove { id } } => client.delete(&format!("/v1/peers/{id}")).await?,
+        Cmd::Peer { cmd: PeerCmd::Internet { state } } => {
+            client.put("/v1/peers/internet", json!({ "enabled": state == "on" })).await?
+        }
     };
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
@@ -430,6 +444,15 @@ async fn start_peering(node: &Node, addr: SocketAddr, a: PeerArgs) -> Result<()>
     })
     .await;
 
+    if !a.no_discovery {
+        let (beacons, targets) = peervps_core::peer::discovery::lan();
+        if let Err(e) = peers.discover(beacons, targets).await {
+            eprintln!("not announcing on the LAN: {e}");
+        }
+    }
+    if a.upnp {
+        peers.set_internet(true).await?;
+    }
     for target in &a.peers {
         match peers.add(target).await {
             Ok(p) => eprintln!("peer {}: {:?}", p.id, p.status),
@@ -467,6 +490,10 @@ impl Client {
 
     async fn post(&self, path: &str, body: Value) -> Result<Value> {
         Self::finish(self.req(reqwest::Method::POST, path).json(&body)).await
+    }
+
+    async fn put(&self, path: &str, body: Value) -> Result<Value> {
+        Self::finish(self.req(reqwest::Method::PUT, path).json(&body)).await
     }
 
     async fn delete(&self, path: &str) -> Result<Value> {
