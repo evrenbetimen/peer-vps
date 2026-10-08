@@ -101,4 +101,26 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Open screen" }));
     expect(screen.queryByText(/no screen/)).not.toBeInTheDocument();
   }, 20_000);
+
+  it("adds a peer, approves one that asked, and rents a peer's machine", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    expect(await screen.findByText("pv-5c0ffee15ea1ab1e@192.168.1.10:7071")).toBeInTheDocument();
+
+    await user.type(screen.getByRole("textbox", { name: "Peer address" }), "pv-0123456789abcdef@192.168.1.40:7071");
+    await user.click(screen.getByRole("button", { name: "Add peer" }));
+    expect(await within(await screen.findByTestId("peer-pv-0123456789abcdef")).findByText("waiting for their approval")).toBeInTheDocument();
+
+    const asking = screen.getByTestId("peer-pv-a17b0c55e9d24f13");
+    expect(within(asking).getByText(/wants to rent from you/)).toBeInTheDocument();
+    await user.click(within(asking).getByRole("button", { name: "Approve" }));
+    await vi.waitFor(() => expect(within(screen.getByTestId("peer-pv-a17b0c55e9d24f13")).getByText("online")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /^Console/ }));
+    await user.click(await screen.findByText("pv-3f9c1a7e2b4d6c80/this-machine"));
+    const deploy = screen.getByRole("button", { name: "Deploy" });
+    await vi.waitFor(() => expect(deploy).toBeEnabled());
+    await user.click(deploy);
+    expect(await screen.findByText(/on pv-3f9c1a7e2b4d6c80/)).toBeInTheDocument();
+  });
 });

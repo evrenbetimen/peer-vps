@@ -94,6 +94,8 @@ export interface Instance {
   virtualIp: string;
   pricePerSec: Micros;
   createdAt: number;
+  /** Peer id of the machine running it, when rented from another PeerVPS. */
+  host?: string;
 }
 
 export interface LedgerEntry {
@@ -232,6 +234,28 @@ export interface Batch {
   dropped: number;
 }
 
+export type PeerStatus = "online" | "waitingForApproval" | "unreachable" | "pending" | "inbound";
+
+export interface PeerInfo {
+  id: string;
+  publicKey: string;
+  address: string | null;
+  trusted: boolean;
+  status: PeerStatus;
+  offers: Offer[];
+  lastSeen: number | null;
+  error: string | null;
+}
+
+export interface PeerOverview {
+  /** This machine's peer id. */
+  id: string;
+  listen: string | null;
+  /** What another machine pastes to add this one: `pv-…@host:port`. */
+  invite: string | null;
+  peers: PeerInfo[];
+}
+
 export interface CmdError {
   code:
     | "not_found"
@@ -240,6 +264,8 @@ export interface CmdError {
     | "invalid_argument"
     | "unauthorized"
     | "unsupported"
+    | "hypervisor_error"
+    | "peer_unavailable"
     | "internal";
   message: string;
 }

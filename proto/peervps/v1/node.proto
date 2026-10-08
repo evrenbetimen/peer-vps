@@ -90,6 +90,8 @@ message Instance {
   string virtual_ip = 6;
   int64 price_per_sec = 7;
   int64 created_at = 8;
+  // Peer id of the machine running it, when rented from another node.
+  optional string host = 9;
 }
 
 message GetInstanceRequest { string id = 1; }

@@ -24,6 +24,10 @@ pub enum Error {
     #[error("hypervisor error: {0}")]
     Hypervisor(String),
 
+    /// Another node could not be reached or refused the request.
+    #[error("peer: {0}")]
+    Peer(String),
+
     #[error("feature unavailable on this host: {0}")]
     Unsupported(String),
 

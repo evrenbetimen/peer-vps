@@ -9,10 +9,10 @@ and macOS, which all must pass.
 
 | Suite | Kind | Where | What it proves |
 |---|---|---|---|
-| Rust unit tests (62) | QC | `crates/*/src/**` `#[cfg(test)]` | Tunnel codec, Noise handshake, STUN, hole punching, routing, failover detection, hibernation sealing, replication, SLA slashing, ledger/meter/collateral/webhooks, Firecracker backend against a fake API server, interface-name rules, host telemetry probes, ISO import and labels, the Windows answer file, a real QEMU booting a Windows-labelled ISO with a password-locked screen |
+| Rust unit tests (67) | QC | `crates/*/src/**` `#[cfg(test)]` | Tunnel codec, Noise handshake, STUN, hole punching, routing, failover detection, hibernation sealing, replication, SLA slashing, ledger/meter/collateral/webhooks, Firecracker backend against a fake API server, interface-name rules, host telemetry probes, ISO import and labels, the Windows answer file, a real QEMU booting a Windows-labelled ISO with a password-locked screen, the Noise XX peer channel, two nodes on localhost renting from each other (approval, remote deploy, SSH carried through the channel, scale, terminate), pinned-key and wrong-id refusals, node key and peer list persistence |
 | CLI acceptance (2–3) | QA | `crates/peervps-cli/tests/acceptance.rs` | Starts the real `peervps serve` binary and walks an agent through offers → deploy → status → per-second billing → scale 0/1 → terminate; rejects a bad API key (401), unknown offer and instance (404); on macOS refuses the Firecracker backend with a clear message |
-| UI unit tests (26) | QC | `apps/desktop/src/**/*.test.ts(x)` | Formatting, the browser mock bridge (offers filter, lifecycle, typed errors, top-ups, failover timing, metering), the 60 fps event store (history caps, once-per-frame flush, routes, balances), app navigation, the main user flows, SSH access lines, image downloads, and adding a Windows ISO then deploying it with a screen and Remote Desktop in jsdom |
-| UI end-to-end (9) | QA | `apps/desktop/e2e/app.spec.ts` | In Chromium (Linux, Windows) and WebKit (macOS, same engine as the app's WKWebView): live telemetry updates, deploy + xterm shell + scale + terminate, offer filters, wallet top-up reaching the ledger, failover reroute after three missed heartbeats and recovery, guest image download, the SSH command shown for a new instance, a Windows ISO added and deployed with Remote Desktop and a screen, every view fitting the 1024×680 minimum window. Any console error or warning fails the test |
+| UI unit tests (28) | QC | `apps/desktop/src/**/*.test.ts(x)` | Formatting, the browser mock bridge (offers filter, lifecycle, typed errors, top-ups, failover timing, metering), the 60 fps event store (history caps, once-per-frame flush, routes, balances), app navigation, the main user flows, SSH access lines, image downloads, and adding a Windows ISO then deploying it with a screen and Remote Desktop in jsdom, adding and approving peers and renting a peer's offer |
+| UI end-to-end (10) | QA | `apps/desktop/e2e/app.spec.ts` | In Chromium (Linux, Windows) and WebKit (macOS, same engine as the app's WKWebView): live telemetry updates, deploy + xterm shell + scale + terminate, offer filters, wallet top-up reaching the ledger, failover reroute after three missed heartbeats and recovery, guest image download, the SSH command shown for a new instance, a Windows ISO added and deployed with Remote Desktop and a screen, adding and approving peers and deploying on a peer, every view fitting the 1024×680 minimum window. Any console error or warning fails the test |
 | QEMU backend | QA | `virtualization/qemu/tests.rs`, `qmp.rs`, `seed.rs`, `images.rs` | Command line per accelerator and OS, QMP protocol, cloud-init seed, snapshot framing, image catalog and checksums; plus a lifecycle test that drives a real QEMU (create → start → pause → snapshot → resume → restore → destroy) wherever QEMU is installed (CI: Linux, macOS) |
 | Real guest boot | QA (manual, recorded below) | `peervps serve --hypervisor qemu` | Ubuntu 24.04 cloud image boots, cloud-init creates the user, SSH with key and sudo work, scale to zero and back keeps the session's files |
 | App smoke tests | QA | `macos-app`, `windows-app` CI jobs | Build the installers, launch the app and verify the node starts and keeps running |
@@ -72,9 +72,25 @@ Defects found and fixed while writing these tests:
 * `peervps scale <id> 0` took 8.6 s (2 GiB RAM snapshot); `scale <id> 1` resumed and the file written before was still there
 * `peervps terminate` stopped QEMU and removed the VM directory
 
+## Two nodes renting from each other (Linux sandbox, software emulation, 2026-10-08)
+
+Node B: `peervps serve --listen 127.0.0.1:7170 --peer-listen 127.0.0.1:7171 --hypervisor qemu` with a CirrOS
+0.6.2 disk imported as `cirros`. Node A: `peervps serve --listen 127.0.0.1:7080 --peer-listen 127.0.0.1:7081`
+(mock hypervisor, so nothing can run on A itself).
+
+* `peervps --api A peer add pv-…@127.0.0.1:7171` → `waitingForApproval`; B listed A as `pending` with its dial-back address
+* `peervps --api B peer approve <A>` → A listed `pv-…/this-machine` among its offers within one refresh
+* both nodes restarted: the keys and peer lists were reloaded and the peers came back `online` without re-approval
+* `peervps --api A deploy pv-…/this-machine --image cirros` → QEMU started on B; `peervps --api A access` gave
+  `ssh -p <local port> …@127.0.0.1` on A
+* through that port: the guest's `SSH-2.0-dropbear` banner, then `ssh cirros@127.0.0.1 -p <port>` logged in and
+  ran `uname` (`Linux 5.15.0-71-generic`, `QEMU TCG CPU`)
+* `peervps --api A terminate` stopped QEMU on B; B's ledger showed the `peer-<A>` account with its welcome credit
+
 ## Not covered yet
 
 * Hardware-accelerated runs (KVM / Hypervisor.framework / WHPX): the sandbox and CI runners have no nested virtualization, so these use software emulation. QEMU on Windows is not installed in CI, so the Windows lifecycle test skips.
 * Firecracker on real `/dev/kvm`; it is tested against a fake API server.
 * TUN device creation (needs root / `CAP_NET_ADMIN`).
+* Peers on different networks: the peer channel is plain TCP by address; two machines behind separate NATs need a forwarded port until it gets hole punching or a relay.
 * Visual regression baselines and load/performance testing of the event pump.

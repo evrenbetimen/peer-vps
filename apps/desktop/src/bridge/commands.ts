@@ -15,6 +15,8 @@ import type {
   Instance,
   Offer,
   OfferQuery,
+  PeerInfo,
+  PeerOverview,
   Topology,
   VmSpec,
   WebhookOutcome,
@@ -59,4 +61,9 @@ export const commands = {
   pullImage: (name: string) => call<void>("pull_image", { name }),
   /** Opens a file picker; resolves to the new image's name, or null when cancelled. */
   importImage: () => call<string | null>("import_image"),
+  getPeers: () => call<PeerOverview>("get_peers"),
+  /** `pv-…@host:port` (an invite) or `host[:port]`. */
+  addPeer: (address: string) => call<PeerInfo>("add_peer", { address }),
+  approvePeer: (id: string) => call<PeerInfo>("approve_peer", { id }),
+  removePeer: (id: string) => call<void>("remove_peer", { id }),
 };

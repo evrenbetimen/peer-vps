@@ -10,6 +10,7 @@
 //! | [`storage`]        | SQLite (WAL) persistence for presence, ledger, collateral and instances |
 //! | [`api`]            | Agent-native REST API (gRPC contract lives in `proto/`)                 |
 //! | [`billing`]        | Per-second ledger, collateral locking/slashing, pools, payment webhooks |
+//! | [`peer`]           | Renting between real nodes: node keys, trust, remote deploys, port carrying |
 //!
 //! Everything that needs real hardware (KVM, SEV-SNP/TDX/SGX, vGPU partitioning,
 //! zero-knowledge proving) sits behind a trait with a software stub so the whole
@@ -22,6 +23,7 @@ pub mod events;
 pub mod failover;
 pub mod network;
 pub mod node;
+pub mod peer;
 pub mod storage;
 pub mod virtualization;
 

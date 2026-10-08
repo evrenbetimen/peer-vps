@@ -139,3 +139,17 @@ test("a Windows ISO is added and installs with a screen and Remote Desktop", asy
   await expect(page.getByRole("button", { name: "Open screen" })).toBeVisible();
   await shot(page, "windows-iso");
 });
+
+test("peers: approve a machine that asked and rent another machine's offer", async ({ page }) => {
+  await expect(page.getByText("pv-5c0ffee15ea1ab1e@192.168.1.10:7071")).toBeVisible();
+  await page.getByRole("textbox", { name: "Peer address" }).fill("pv-0123456789abcdef@192.168.1.40:7071");
+  await page.getByRole("button", { name: "Add peer" }).click();
+  await expect(page.getByTestId("peer-pv-0123456789abcdef")).toContainText("waiting for their approval");
+  await page.getByTestId("peer-pv-a17b0c55e9d24f13").getByRole("button", { name: "Approve" }).click();
+  await expect(page.getByTestId("peer-pv-a17b0c55e9d24f13")).toContainText("online");
+  await shot(page, "peers");
+  await nav(page, "Console").click();
+  await page.getByText("pv-3f9c1a7e2b4d6c80/this-machine").click();
+  await page.getByRole("button", { name: "Deploy" }).click();
+  await expect(page.getByText(/on pv-3f9c1a7e2b4d6c80/)).toBeVisible();
+});

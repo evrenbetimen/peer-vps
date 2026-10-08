@@ -6,6 +6,7 @@ use peervps_core::api::market::{Offer, OfferQuery};
 use peervps_core::billing::CollateralState;
 use peervps_core::billing::payments::{self, WebhookOutcome};
 use peervps_core::node::{AccountSummary, DeployRequest, Instance};
+use peervps_core::peer::{PeerInfo, PeerOverview, Peers};
 use peervps_core::storage::now_secs;
 use peervps_core::virtualization::accel::AcceleratorKind;
 use peervps_core::virtualization::{GuestAccess, HostBudget, VmRecord};
@@ -39,6 +40,7 @@ impl From<Error> for CmdError {
             Error::Unauthorized(_) => "unauthorized",
             Error::Unsupported(_) => "unsupported",
             Error::Hypervisor(_) => "hypervisor_error",
+            Error::Peer(_) => "peer_unavailable",
             _ => "internal",
         };
         Self { code, message: e.to_string() }
@@ -227,4 +229,31 @@ pub async fn open_guest_screen(app: tauri::AppHandle, state: State<'_, AppState>
 #[tauri::command]
 pub async fn get_console(state: State<'_, AppState>, id: String) -> CmdResult<Option<String>> {
     Ok(state.node.console(&state.renter, &id, 64 * 1024).await?)
+}
+
+fn peers(state: &AppState) -> CmdResult<&Peers> {
+    Ok(state.node.peers().ok_or_else(|| Error::Unsupported("peering did not start".into()))?)
+}
+
+/// This machine's peer id and invite, and every peer it knows.
+#[tauri::command]
+pub async fn get_peers(state: State<'_, AppState>) -> CmdResult<PeerOverview> {
+    Ok(peers(&state)?.overview().await)
+}
+
+/// Add another machine by its invite (`pv-…@host:port`) or address.
+#[tauri::command]
+pub async fn add_peer(state: State<'_, AppState>, address: String) -> CmdResult<PeerInfo> {
+    Ok(peers(&state)?.add(&address).await?)
+}
+
+/// Let a machine that asked to rent from this one in.
+#[tauri::command]
+pub async fn approve_peer(state: State<'_, AppState>, id: String) -> CmdResult<PeerInfo> {
+    Ok(peers(&state)?.approve(&id).await?)
+}
+
+#[tauri::command]
+pub async fn remove_peer(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    Ok(peers(&state)?.remove(&id).await?)
 }
