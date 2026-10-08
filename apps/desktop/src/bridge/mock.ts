@@ -6,6 +6,7 @@ import type {
   Batch,
   HostAllocation,
   HostSnapshot,
+  Images,
   Instance,
   NodeEvent,
   Offer,
@@ -26,6 +27,28 @@ const instances: Instance[] = [];
 const wallet: AccountSummary = { account: "demo-agent", balance: 50 * C, history: [] };
 const alive: Record<string, boolean> = { "host-b": true, "host-c": true };
 let activePeer = "host-b";
+const catalog = [
+  { name: "ubuntu-24.04", title: "Ubuntu 24.04 LTS" },
+  { name: "ubuntu-22.04", title: "Ubuntu 22.04 LTS" },
+  { name: "debian-13", title: "Debian 13" },
+];
+const installed: Images["installed"] = [{ name: "ubuntu-24.04", sizeBytes: 625_612_288 }];
+const downloads: Images["downloads"] = {};
+const MOCK_IMAGE_BYTES = 400_000_000;
+
+function simulateDownload(name: string) {
+  downloads[name] = { done: 0, total: MOCK_IMAGE_BYTES, error: null };
+  const id = setInterval(() => {
+    const d = downloads[name];
+    if (!d) return clearInterval(id);
+    d.done = Math.min(MOCK_IMAGE_BYTES, d.done + MOCK_IMAGE_BYTES / 8);
+    if (d.done >= MOCK_IMAGE_BYTES) {
+      clearInterval(id);
+      delete downloads[name];
+      installed.push({ name, sizeBytes: MOCK_IMAGE_BYTES });
+    }
+  }, 250);
+}
 let emit: ((b: Batch) => void) | null = null;
 
 function event(e: NodeEvent) {
@@ -76,6 +99,7 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
           collateral: { provider: "local", locked: 150 * C, minimum: 100 * C, eligible: true },
           earnings: 100 * C,
           hypervisor: "mock (browser)",
+          hypervisorNote: null,
         } satisfies HostSnapshot;
       case "set_host_allocation":
         allocation = args.allocation as HostAllocation;
@@ -135,6 +159,25 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         event({ type: "failover", peer: args.peer as string, phase: "recovered", missedHeartbeats: 0, movedVips: [], atMs: Date.now() });
         if (alive["host-b"] && alive["host-c"]) activePeer = "host-b";
         return topology();
+      case "get_instance_access": {
+        const inst = instances.find((i) => i.id === args.id);
+        if (!inst) throw { code: "not_found", message: `instance ${String(args.id)}` };
+        if (inst.state === "terminated") return null;
+        return { sshHost: "127.0.0.1", sshPort: 2200 + instances.indexOf(inst), user: "peervps", password: "mock-password" };
+      }
+      case "get_console": {
+        const inst = instances.find((i) => i.id === args.id);
+        if (!inst) throw { code: "not_found", message: `instance ${String(args.id)}` };
+        return null;
+      }
+      case "list_images":
+        return { dir: "~/PeerVPS/images", installed, catalog, downloads } satisfies Images;
+      case "pull_image": {
+        const name = args.name as string;
+        if (!catalog.some((c) => c.name === name)) throw { code: "not_found", message: `no catalog image ${name}` };
+        if (!downloads[name] && !installed.some((i) => i.name === name)) simulateDownload(name);
+        return null;
+      }
       default:
         throw { code: "unsupported", message: `mock: unknown command ${cmd}` };
     }

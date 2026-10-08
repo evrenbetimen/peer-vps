@@ -109,3 +109,19 @@ test("every view fits the minimum window without horizontal scroll", async ({ pa
     expect(overflow, `${name} overflows by ${overflow}px`).toBeLessThanOrEqual(0);
   }
 });
+
+test("guest images can be downloaded from the host view", async ({ page }) => {
+  const debian = page.getByTestId("image-debian-13");
+  await expect(page.getByTestId("image-ubuntu-24.04")).toContainText("installed");
+  await debian.getByRole("button", { name: "Download" }).click();
+  await expect(debian).toContainText(/downloading/);
+  await expect(debian).toContainText("installed", { timeout: 10_000 });
+});
+
+test("a deployed instance shows how to SSH in", async ({ page }) => {
+  await nav(page, "Console").click();
+  await expect(page.getByText(/^3 · Offers · [1-9]/)).toBeVisible();
+  await page.getByRole("button", { name: "Deploy" }).click();
+  await expect(page.getByRole("button", { name: /^ssh -p \d+ peervps@127\.0\.0\.1$/ })).toBeVisible();
+  await expect(page.getByText("mock-password")).toBeVisible();
+});

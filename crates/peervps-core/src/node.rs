@@ -19,7 +19,7 @@ use crate::storage::{Store, now_secs};
 use crate::virtualization::accel::{AcceleratorDevice, AcceleratorKind, PartitionedAccelerators};
 use crate::virtualization::confidential::{self, MemoryEncryption, NoEncryption, SevSnpStub, TeeKind};
 use crate::virtualization::mock::MockHypervisor;
-use crate::virtualization::{HostBudget, Hypervisor, Provisioner, VmId, VmSpec, VmState};
+use crate::virtualization::{GuestAccess, HostBudget, Hypervisor, Provisioner, VmId, VmSpec, VmState};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,6 +328,15 @@ impl Node {
             return Ok(None);
         }
         self.provisioner.hypervisor().console_tail(inst.vm, max_bytes).await
+    }
+
+    /// How to log in to the instance (`None` when the backend gives guests no SSH endpoint).
+    pub async fn access(&self, renter: &str, id: &str) -> Result<Option<GuestAccess>> {
+        let inst = self.instance(renter, id).await?;
+        if inst.state == InstanceState::Terminated {
+            return Ok(None);
+        }
+        self.provisioner.hypervisor().access(inst.vm).await
     }
 
     pub async fn account(&self, account: &str) -> Result<AccountSummary> {

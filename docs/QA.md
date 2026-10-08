@@ -9,23 +9,26 @@ and macOS, which all must pass.
 
 | Suite | Kind | Where | What it proves |
 |---|---|---|---|
-| Rust unit tests (47) | QC | `crates/*/src/**` `#[cfg(test)]` | Tunnel codec, Noise handshake, STUN, hole punching, routing, failover detection, hibernation sealing, replication, SLA slashing, ledger/meter/collateral/webhooks, Firecracker backend against a fake API server, interface-name rules, host telemetry probes |
+| Rust unit tests (58) | QC | `crates/*/src/**` `#[cfg(test)]` | Tunnel codec, Noise handshake, STUN, hole punching, routing, failover detection, hibernation sealing, replication, SLA slashing, ledger/meter/collateral/webhooks, Firecracker backend against a fake API server, interface-name rules, host telemetry probes |
 | CLI acceptance (2–3) | QA | `crates/peervps-cli/tests/acceptance.rs` | Starts the real `peervps serve` binary and walks an agent through offers → deploy → status → per-second billing → scale 0/1 → terminate; rejects a bad API key (401), unknown offer and instance (404); on macOS refuses the Firecracker backend with a clear message |
-| UI unit tests (21) | QC | `apps/desktop/src/**/*.test.ts(x)` | Formatting, the browser mock bridge (offers filter, lifecycle, typed errors, top-ups, failover timing, metering), the 60 fps event store (history caps, once-per-frame flush, routes, balances), app navigation and the main user flows in jsdom |
-| UI end-to-end (6) | QA | `apps/desktop/e2e/app.spec.ts` | In Chromium (Linux) and WebKit (macOS, same engine as the app's WKWebView): live telemetry updates, deploy + xterm shell + scale + terminate, offer filters, wallet top-up reaching the ledger, failover reroute after three missed heartbeats and recovery, every view fitting the 1024×680 minimum window. Any console error or warning fails the test |
-| macOS app smoke test | QA | `macos-app` CI job | Builds the `.app`/`.dmg`, checks the bundle, launches it and verifies the node starts and keeps running |
+| UI unit tests (24) | QC | `apps/desktop/src/**/*.test.ts(x)` | Formatting, the browser mock bridge (offers filter, lifecycle, typed errors, top-ups, failover timing, metering), the 60 fps event store (history caps, once-per-frame flush, routes, balances), app navigation, the main user flows, SSH access lines and image downloads in jsdom |
+| UI end-to-end (8) | QA | `apps/desktop/e2e/app.spec.ts` | In Chromium (Linux, Windows) and WebKit (macOS, same engine as the app's WKWebView): live telemetry updates, deploy + xterm shell + scale + terminate, offer filters, wallet top-up reaching the ledger, failover reroute after three missed heartbeats and recovery, guest image download, the SSH command shown for a new instance, every view fitting the 1024×680 minimum window. Any console error or warning fails the test |
+| QEMU backend | QA | `virtualization/qemu/tests.rs`, `qmp.rs`, `seed.rs`, `images.rs` | Command line per accelerator and OS, QMP protocol, cloud-init seed, snapshot framing, image catalog and checksums; plus a lifecycle test that drives a real QEMU (create → start → pause → snapshot → resume → restore → destroy) wherever QEMU is installed (CI: Linux, macOS) |
+| Real guest boot | QA (manual, recorded below) | `peervps serve --hypervisor qemu` | Ubuntu 24.04 cloud image boots, cloud-init creates the user, SSH with key and sudo work, scale to zero and back keeps the session's files |
+| App smoke tests | QA | `macos-app`, `windows-app` CI jobs | Build the installers, launch the app and verify the node starts and keeps running |
 
 ## CI gates (`.github/workflows/ci.yml`)
 
-Run on `ubuntu-24.04` and `macos-15` for every pull request and every push to `main`:
+Run on `ubuntu-24.04`, `macos-15` and `windows-2025` for every pull request and every push to `main`:
 
 1. `pnpm build`: TypeScript strict typecheck + production bundle
 2. `pnpm test:coverage`: UI unit tests; fails below 70 % lines, 65 % functions, 60 % branches
-3. `pnpm test:e2e`: Playwright QA scenarios (Chromium on Linux, WebKit on macOS)
+3. `pnpm test:e2e`: Playwright QA scenarios (Chromium on Linux and Windows, WebKit on macOS)
 4. `cargo fmt --all --check`
 5. `cargo clippy --workspace --all-targets -- -D warnings` with `unsafe_code = "deny"` workspace-wide (the KVM module is the only audited exception)
 6. `cargo test --workspace`: unit + acceptance tests
-7. `macos-app` (after the above): unsigned Apple-silicon `.dmg`, launch smoke test, uploaded as the `PeerVPS-macos-arm64` artifact
+7. `macos-app` and `windows-app` (after the above): unsigned `.dmg` and NSIS installer, launch smoke test,
+   uploaded as the `PeerVPS-macos-arm64` and `PeerVPS-windows-x64` artifacts
 
 Playwright reports, failure traces and the coverage report are uploaded as `qa-report-<os>` on every run.
 
@@ -38,7 +41,7 @@ pnpm test:e2e             # all browsers; add --project chromium or --project we
 cargo test --workspace
 ```
 
-## Results for this change (Linux sandbox, 2026-10-08)
+## Results when the QA suites were introduced (Linux sandbox, 2026-10-08)
 
 | Gate | Result |
 |---|---|
@@ -59,8 +62,19 @@ Defects found and fixed while writing these tests:
 * **No accessible state on navigation and pickers.** Added `aria-current` to the active view and
   `aria-pressed` and group labels to the template and size pickers, which the tests (and screen readers) rely on.
 
+## Real VM run for the QEMU backend (Linux sandbox, software emulation, 2026-10-08)
+
+`peervps image pull ubuntu-24.04` (625 MB, SHA-256 verified) → `peervps serve --hypervisor qemu --ssh-key k.pub`
+→ `peervps deploy fra-cpu-1 --vcpus 2 --mem-mib 2048 --disk-gib 10 --image ubuntu-24.04`:
+
+* cloud-init finished from the PeerVPS seed (`DataSourceNoCloudNet [seed=dmi,http://10.0.2.2:…]`) after 140 s without acceleration
+* `ssh -p <port> peervps@127.0.0.1` with the key: Ubuntu 6.8 kernel, 2 vCPU, 1.9 GiB RAM, root grown to 8.7 GiB, `sudo -n whoami` → `root`
+* `peervps scale <id> 0` took 8.6 s (2 GiB RAM snapshot); `scale <id> 1` resumed and the file written before was still there
+* `peervps terminate` stopped QEMU and removed the VM directory
+
 ## Not covered yet
 
-* Real MicroVM boot on `/dev/kvm` and on macOS (needs a Virtualization.framework backend); the Firecracker backend is tested against a fake API server.
+* Hardware-accelerated runs (KVM / Hypervisor.framework / WHPX): the sandbox and CI runners have no nested virtualization, so these use software emulation. QEMU on Windows is not installed in CI, so the Windows lifecycle test skips.
+* Firecracker on real `/dev/kvm`; it is tested against a fake API server.
 * TUN device creation (needs root / `CAP_NET_ADMIN`).
 * Visual regression baselines and load/performance testing of the event pump.

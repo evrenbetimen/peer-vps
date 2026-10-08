@@ -138,6 +138,38 @@ export interface HostSnapshot {
   collateral: CollateralState;
   earnings: Micros;
   hypervisor: string;
+  /** Why guests are simulated (QEMU missing); null when real VMs run. */
+  hypervisorNote: string | null;
+}
+
+export interface GuestAccess {
+  sshHost: string;
+  sshPort: number;
+  user: string;
+  password: string | null;
+}
+
+export interface CatalogImage {
+  name: string;
+  title: string;
+}
+
+export interface LocalImage {
+  name: string;
+  sizeBytes: number;
+}
+
+export interface Download {
+  done: number;
+  total: number | null;
+  error: string | null;
+}
+
+export interface Images {
+  dir: string;
+  installed: LocalImage[];
+  catalog: CatalogImage[];
+  downloads: Record<string, Download>;
 }
 
 export type FailoverPhase = "healthy" | "suspect" | "down" | "rerouted" | "stranded" | "recovered";

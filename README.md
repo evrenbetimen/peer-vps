@@ -41,21 +41,52 @@ opens the same UI in a browser at http://localhost:1420 against mock data. Scree
 
 ## Platforms
 
-| | Linux | macOS (12+, Apple silicon and Intel) |
-|---|---|---|
-| Desktop app, CLI, renter side, wallet, overlay codec | ✓ | ✓ |
-| Host telemetry (CPU, RAM, network, temperature) | ✓ | ✓ (via `sysinfo`) |
-| Overlay TUN device | `/dev/net/tun` | `utun<N>` (needs root) |
-| Hosting real MicroVMs | Firecracker or KVM (`/dev/kvm`) | not yet: mock hypervisor; an Apple Virtualization.framework backend is the next step |
+| | Linux | macOS (12+, Apple silicon and Intel) | Windows (10/11, x64) |
+|---|---|---|---|
+| Desktop app, CLI, renter side, wallet, overlay codec | ✓ | ✓ | ✓ |
+| Host telemetry (CPU, RAM, network, temperature) | ✓ | ✓ | ✓ |
+| **Local VMs** (QEMU backend) | ✓ KVM | ✓ Hypervisor.framework | ✓ Windows Hypervisor Platform |
+| Firecracker MicroVMs | ✓ (`/dev/kvm`) | — | — |
+| Overlay TUN device | `/dev/net/tun` | `utun<N>` (needs root) | not yet (Wintun) |
 
-CI builds and tests every commit on both, and attaches an unsigned `PeerVPS.dmg` to each run. Because it
-is unsigned, open it the first time with right-click → Open (or `xattr -dr com.apple.quarantine /Applications/PeerVPS.app`).
+CI builds and tests every commit on all three and attaches an unsigned `PeerVPS.dmg` (macOS) and
+`PeerVPS_x64-setup.exe` (Windows) to each run. Because they are unsigned, open the Mac app the first time
+with right-click → Open, and on Windows choose "More info → Run anyway" in SmartScreen.
+
+## Local VMs (Linux, macOS, Windows)
+
+The QEMU backend runs real virtual machines on the machine PeerVPS runs on, with the OS's own
+hypervisor: KVM on Linux, Hypervisor.framework on macOS, the Windows Hypervisor Platform on Windows
+(falls back to software emulation when none is available). Guests boot stock cloud images from a
+copy-on-write overlay, get a login user, password and your SSH keys through cloud-init, and are
+reachable with `ssh -p <port> peervps@127.0.0.1`. No root, bridge or tap device is needed.
+
+1. Install QEMU: `brew install qemu` · `sudo apt install qemu-system qemu-utils` ·
+   `winget install SoftwareFreedomConservancy.QEMU` (Windows also needs the "Windows Hypervisor Platform"
+   feature turned on in *Turn Windows features on or off*).
+2. **Desktop app:** PeerVPS finds QEMU by itself. Download an image under Host → Guest images, then
+   deploy from Console against "this-machine". The instance shows its SSH command and password, and the
+   terminal shows the guest's live serial console.
+3. **Headless / agents:**
+
+```bash
+peervps image pull ubuntu-24.04                  # also ubuntu-22.04, debian-13; checksum-verified
+peervps serve --hypervisor qemu --ssh-key ~/.ssh/id_ed25519.pub
+peervps deploy fra-cpu-1 --vcpus 2 --mem-mib 2048 --disk-gib 20 --image ubuntu-24.04
+peervps access <instance-id>                     # {"command": "ssh -p 40123 peervps@127.0.0.1", "access": {...}}
+```
+
+Images live in `~/.local/share/peervps/images`, `~/Library/Application Support/PeerVPS/images` or
+`%LOCALAPPDATA%\PeerVPS\images`. Any qcow2 disk dropped there can be deployed by its file name, including
+a Windows guest you bring yourself (it needs virtio drivers; cloud-init setup is skipped for it). macOS
+guests are not offered: Apple's license only allows them on Apple hardware through Virtualization.framework,
+which is a separate backend.
 
 ## What is real and what is a stub
 
 | Area | Working today | Stubbed behind a trait (next steps) |
 |---|---|---|
-| Virtualization | Resource allocator with core pinning, RAM/disk budgets, fractional GPU/NPU slice accounting; **Firecracker backend boots real MicroVMs** (per-VM disk, pinned cores, optional bridged tap NIC, pause/resume, full snapshot + restore, serial console); raw KVM backend creates VM, RAM and vCPUs | Firecracker `jailer` hardening, reflink/overlay disks, GPU passthrough (needs a QEMU/cloud-hypervisor backend), SEV-SNP/TDX launch and real attestation |
+| Virtualization | Resource allocator with core pinning, RAM/disk budgets, fractional GPU/NPU slice accounting; **QEMU backend runs real VMs on Linux, macOS and Windows** (cloud images, copy-on-write disks, cloud-init login, SSH port forward, pause/resume, snapshot + restore, serial console); **Firecracker backend boots real MicroVMs** (per-VM disk, pinned cores, optional bridged tap NIC, pause/resume, full snapshot + restore, serial console); raw KVM backend creates VM, RAM and vCPUs | Firecracker `jailer` hardening, reflink/overlay disks, GPU passthrough (needs a QEMU/cloud-hypervisor backend), SEV-SNP/TDX launch and real attestation |
 | Proof of compute | Nonce-bound sequential BLAKE3 hash-chain with spot-check verification and tier timing | Succinct ZK proof (zkVM receipt) behind the same `ComputeProver`/`ComputeVerifier` traits |
 | Network | Tunnel codec (zstd → ChaCha20-Poly1305, replay window), Noise IK handshake (`snow`), STUN client/responder, UDP hole punching with port spraying, overlay routing table, Linux TUN pump | TURN relay fallback, DHT RPCs on the wire, QUIC snapshot transport |
 | Failover | Authenticated heartbeats, 3-miss detection, route flip to standby, snapshot seal/open (zstd + chunked AEAD), SIGTERM/SIGINT hibernation, dirty-block replication, SLA slashing | logind shutdown inhibitor, replica restore path |
@@ -66,10 +97,12 @@ is unsigned, open it the first time with right-click → Open (or `xattr -dr com
 ## Prerequisites
 
 * Rust 1.90+ (edition 2024)
+* QEMU, only for real local VMs (see "Local VMs")
 * Node 22 + pnpm 10
 * Linux desktop builds: `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev`
-* macOS: Xcode Command Line Tools (`xcode-select --install`); nothing else
-  (see the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for Windows)
+* macOS: Xcode Command Line Tools (`xcode-select --install`)
+* Windows: Visual Studio Build Tools with "Desktop development with C++" and WebView2 (preinstalled on Windows 11);
+  see the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
 
 ## Build, lint, test
 
@@ -110,7 +143,7 @@ sudo cargo run -p peervps-cli -- serve --hypervisor firecracker \
   [--bridge br0]                                     # give guests a NIC on an existing bridge
 ```
 
-Every VM gets `/var/lib/peervps/vms/<vm>/` with its API socket, root disk, snapshot files and `console.log`.
+Every VM gets `<data dir>/vms/<vm>/` (or `--run-dir`) with its API socket, root disk, snapshot files and `console.log`.
 Without `--bridge` guests boot with no network. Guests asking for a GPU/NPU are refused by this backend.
 
 ## Safety rules

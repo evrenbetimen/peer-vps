@@ -8,8 +8,10 @@ import { mockInvoke } from "./mock";
 import type {
   AccountSummary,
   CmdError,
+  GuestAccess,
   HostAllocation,
   HostSnapshot,
+  Images,
   Instance,
   Offer,
   OfferQuery,
@@ -50,4 +52,8 @@ export const commands = {
   getTopology: () => call<Topology>("get_topology"),
   killPeer: (peer: string) => call<Topology>("kill_peer", { peer }),
   restorePeer: (peer: string) => call<Topology>("restore_peer", { peer }),
+  getInstanceAccess: (id: string) => call<GuestAccess | null>("get_instance_access", { id }),
+  getConsole: (id: string) => call<string | null>("get_console", { id }),
+  listImages: () => call<Images>("list_images"),
+  pullImage: (name: string) => call<void>("pull_image", { name }),
 };

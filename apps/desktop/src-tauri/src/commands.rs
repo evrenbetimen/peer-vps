@@ -8,7 +8,7 @@ use peervps_core::billing::payments::{self, WebhookOutcome};
 use peervps_core::node::{AccountSummary, DeployRequest, Instance};
 use peervps_core::storage::now_secs;
 use peervps_core::virtualization::accel::AcceleratorKind;
-use peervps_core::virtualization::{HostBudget, VmRecord};
+use peervps_core::virtualization::{GuestAccess, HostBudget, VmRecord};
 use peervps_core::{Error, Node};
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -23,6 +23,12 @@ pub struct CmdError {
     message: String,
 }
 
+impl From<std::io::Error> for CmdError {
+    fn from(e: std::io::Error) -> Self {
+        Error::Io(e).into()
+    }
+}
+
 impl From<Error> for CmdError {
     fn from(e: Error) -> Self {
         let code = match &e {
@@ -32,6 +38,7 @@ impl From<Error> for CmdError {
             Error::Invalid(_) => "invalid_argument",
             Error::Unauthorized(_) => "unauthorized",
             Error::Unsupported(_) => "unsupported",
+            Error::Hypervisor(_) => "hypervisor_error",
             _ => "internal",
         };
         Self { code, message: e.to_string() }
@@ -93,6 +100,7 @@ pub struct HostSnapshot {
     collateral: CollateralState,
     earnings: i64,
     hypervisor: &'static str,
+    hypervisor_note: Option<String>,
 }
 
 #[tauri::command]
@@ -110,6 +118,7 @@ pub async fn get_host_snapshot(state: State<'_, AppState>) -> CmdResult<HostSnap
         collateral: node.collateral.state(&state.provider).await?,
         earnings: node.ledger.balance(&state.provider).await?,
         hypervisor: node.provisioner.hypervisor().name(),
+        hypervisor_note: state.hypervisor_note.clone(),
     })
 }
 
@@ -191,4 +200,15 @@ pub async fn restore_peer(state: State<'_, AppState>, peer: String) -> CmdResult
         return Err(Error::NotFound(format!("peer {peer}")).into());
     }
     Ok(state.demo.topology().await)
+}
+
+#[tauri::command]
+pub async fn get_instance_access(state: State<'_, AppState>, id: String) -> CmdResult<Option<GuestAccess>> {
+    Ok(state.node.access(&state.renter, &id).await?)
+}
+
+/// Last 64 KiB of the guest's serial console.
+#[tauri::command]
+pub async fn get_console(state: State<'_, AppState>, id: String) -> CmdResult<Option<String>> {
+    Ok(state.node.console(&state.renter, &id, 64 * 1024).await?)
 }
