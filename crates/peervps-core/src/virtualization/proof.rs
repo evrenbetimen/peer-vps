@@ -104,8 +104,13 @@ impl ComputeVerifier for HashChainVerifier {
         }
         // Segment 0 is always checked: it is the only one tied to the seed, so
         // skipping it would let a host replay a chain computed for another nonce.
-        let mut rng = rand::rng();
-        let picks = std::iter::once(0).chain((1..samples.min(segments)).map(|_| rng.random_range(0..segments)));
+        // Asking for as many samples as there are segments checks every one.
+        let picks: Vec<usize> = if samples >= segments {
+            (0..segments).collect()
+        } else {
+            let mut rng = rand::rng();
+            std::iter::once(0).chain((1..samples).map(|_| rng.random_range(0..segments))).collect()
+        };
         for i in picks {
             let prev = if i == 0 { c.seed() } else { proof.checkpoints[i - 1] };
             if run_segment(prev, c.stride) != proof.checkpoints[i] {

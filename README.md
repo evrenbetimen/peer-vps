@@ -53,6 +53,15 @@ CI builds and tests every commit on all three and attaches an unsigned `PeerVPS.
 `PeerVPS_x64-setup.exe` (Windows) to each run. Because they are unsigned, open the Mac app the first time
 with right-click → Open, and on Windows choose "More info → Run anyway" in SmartScreen.
 
+## Releases
+
+Installers and CLI binaries for all three systems are on the
+[Releases page](https://github.com/evrenbetimen/peer-vps/releases): `.AppImage`/`.deb` (Linux x64),
+a universal `.dmg` (macOS), `*-setup.exe` (Windows x64), the `peervps` CLI as an archive per system, and
+`SHA256SUMS`. To cut one, bump the version in `Cargo.toml`, `apps/desktop/package.json` and
+`apps/desktop/src-tauri/tauri.conf.json`, then push a `vX.Y.Z` tag or run the **Release** workflow
+from the Actions tab with that tag.
+
 ## Local VMs (Linux, macOS, Windows)
 
 The QEMU backend runs real virtual machines on the machine PeerVPS runs on, with the OS's own

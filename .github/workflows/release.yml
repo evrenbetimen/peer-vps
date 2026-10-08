@@ -1,0 +1,174 @@
+name: Release
+
+# Builds the desktop installers and the `peervps` CLI for Linux, macOS and Windows
+# and publishes them as a GitHub Release.
+#
+# Trigger it either by pushing a tag (`git tag v0.1.0 && git push origin v0.1.0`)
+# or from the Actions tab ("Run workflow" with a tag name); the second form
+# creates the tag on the chosen commit. A pull request that edits this file runs
+# the builds as a dry run without publishing anything.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: [.github/workflows/release.yml]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release, e.g. v0.1.0 (must match the workspace version)"
+        required: true
+      prerelease:
+        description: "Mark as a pre-release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || (github.event_name == 'pull_request' && 'v0.0.0-dryrun') || github.ref_name }}
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the version in Cargo.toml, package.json and tauri.conf.json
+        if: github.event_name != 'pull_request'
+        run: |
+          want="${TAG#v}"
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          npm=$(jq -r .version apps/desktop/package.json)
+          tauri=$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)
+          echo "tag=$want cargo=$cargo npm=$npm tauri=$tauri"
+          test "$want" = "$cargo" && test "$want" = "$npm" && test "$want" = "$tauri"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-22.04 # oldest supported glibc, so the binaries run on more distros
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+          - name: macos-universal
+            os: macos-15
+            target: universal-apple-darwin # Apple silicon + Intel in one .dmg
+            bundles: dmg
+          - name: windows-x64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tauri system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Desktop app
+        run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      - name: CLI
+        shell: bash
+        run: |
+          mkdir -p dist
+          name="peervps-${TAG}-${{ matrix.target }}"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cargo build --release --locked -p peervps-cli --target aarch64-apple-darwin
+            cargo build --release --locked -p peervps-cli --target x86_64-apple-darwin
+            mkdir -p "$name"
+            lipo -create -output "$name/peervps" \
+              target/aarch64-apple-darwin/release/peervps target/x86_64-apple-darwin/release/peervps
+            lipo -archs "$name/peervps"
+          else
+            cargo build --release --locked -p peervps-cli --target ${{ matrix.target }}
+            mkdir -p "$name"
+            exe=peervps; [ "${{ runner.os }}" = "Windows" ] && exe=peervps.exe
+            cp "target/${{ matrix.target }}/release/$exe" "$name/"
+          fi
+          cp README.md LICENSE* "$name/" 2>/dev/null || true
+          "./$name/peervps" --version
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "dist/$name.zip" "$name" > /dev/null
+          else
+            tar czf "dist/$name.tar.gz" "$name"
+          fi
+
+      - name: Collect installers
+        shell: bash
+        run: |
+          b=target/${{ matrix.target }}/release/bundle
+          find "$b" -maxdepth 2 -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*-setup.exe' \) -exec cp {} dist/ \;
+          ls -l dist
+          test "$(ls dist | wc -l)" -ge 2
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cat > notes.md <<'EOF'
+          ## Downloads
+
+          | System | Desktop app | Command line |
+          |---|---|---|
+          | Linux (x64) | `.AppImage` or `.deb` | `peervps-*-x86_64-unknown-linux-gnu.tar.gz` |
+          | macOS 12+ (Apple silicon and Intel) | `.dmg` | `peervps-*-universal-apple-darwin.tar.gz` |
+          | Windows 10/11 (x64) | `*-setup.exe` | `peervps-*-x86_64-pc-windows-msvc.zip` |
+
+          Local VMs need QEMU (`apt install qemu-system qemu-utils`, `brew install qemu`, or the
+          Windows installer from qemu.org). See the README's "Local VMs" section.
+
+          The installers are not code-signed yet: on macOS right-click the app and choose Open the
+          first time; on Windows choose "More info" and then "Run anyway" in SmartScreen.
+          Verify downloads against `SHA256SUMS`.
+          EOF
+          flags=()
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            [ "${{ inputs.prerelease }}" = "true" ] && flags+=(--prerelease)
+          fi
+          gh release create "$TAG" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "PeerVPS $TAG" \
+            --notes-file notes.md \
+            --generate-notes \
+            "${flags[@]}"
