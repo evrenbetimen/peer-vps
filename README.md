@@ -65,7 +65,7 @@ is unsigned, open it the first time with right-click → Open (or `xattr -dr com
 
 ## Prerequisites
 
-* Rust 1.85+ (edition 2024)
+* Rust 1.90+ (edition 2024)
 * Node 22 + pnpm 10
 * Linux desktop builds: `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev`
 * macOS: Xcode Command Line Tools (`xcode-select --install`); nothing else

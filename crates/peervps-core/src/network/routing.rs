@@ -61,12 +61,12 @@ impl RoutingTable {
         {
             let mut routes = self.write();
             for (vip, route) in routes.iter_mut() {
-                if route.peer_id == failed_peer {
-                    if let Some((peer, endpoint)) = route.backup.take() {
-                        route.peer_id = peer;
-                        route.endpoint = endpoint;
-                        moved.push(*vip);
-                    }
+                if route.peer_id == failed_peer
+                    && let Some((peer, endpoint)) = route.backup.take()
+                {
+                    route.peer_id = peer;
+                    route.endpoint = endpoint;
+                    moved.push(*vip);
                 }
             }
         }
