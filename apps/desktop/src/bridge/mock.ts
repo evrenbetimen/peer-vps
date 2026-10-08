@@ -139,7 +139,8 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         throw { code: "unsupported", message: `mock: unknown command ${cmd}` };
     }
   })();
-  return out as T;
+  // Real IPC hands back freshly deserialized objects; never leak shared mutable state to React.
+  return structuredClone(out) as T;
 }
 
 export function startMockPump(sink: (b: Batch) => void): () => void {

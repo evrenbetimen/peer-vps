@@ -6,3 +6,7 @@ apps/desktop/src-tauri/gen/schemas/
 *.db-shm
 *.db-wal
 .DS_Store
+apps/desktop/test-results/
+apps/desktop/playwright-report/
+apps/desktop/coverage/
+.firecracker/

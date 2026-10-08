@@ -1,6 +1,7 @@
-//! Linux TUN interface + the packet pump between it and the UDP tunnel.
+//! TUN interface + the packet pump between it and the UDP tunnel.
 //!
-//! Creating the interface needs `CAP_NET_ADMIN`, so this path is exercised on
+//! Linux uses `/dev/net/tun` and needs `CAP_NET_ADMIN`; macOS uses a kernel
+//! `utun` control socket and needs root. Either way this path is exercised on
 //! real hosts only; the pieces it composes are unit-tested individually.
 
 use std::collections::HashMap;
@@ -16,11 +17,34 @@ use super::routing::RoutingTable;
 use crate::{Error, Result};
 
 /// Create and bring up `name` with `address/prefix`.
-pub fn create(name: &str, address: Ipv4Addr, prefix: u8) -> Result<tun::AsyncDevice> {
+///
+/// macOS only accepts `utun<N>` names; pass `None` to let the OS pick one.
+pub fn create(name: Option<&str>, address: Ipv4Addr, prefix: u8) -> Result<tun::AsyncDevice> {
+    if let Some(name) = name {
+        validate_name(name)?;
+    }
     let netmask = Ipv4Addr::from(u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0));
     let mut cfg = tun::Configuration::default();
-    cfg.tun_name(name).address(address).netmask(netmask).mtu(TUNNEL_MTU).up();
+    if let Some(name) = name {
+        cfg.tun_name(name);
+    }
+    cfg.address(address).netmask(netmask).mtu(TUNNEL_MTU).up();
+    let name = name.unwrap_or("(auto)");
     tun::create_as_async(&cfg).map_err(|e| Error::Io(std::io::Error::other(format!("create tun {name}: {e}"))))
+}
+
+/// Interface names are at most 15 bytes (IFNAMSIZ − 1); macOS also requires `utun<digits>`.
+pub fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 15 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(Error::Invalid(format!("bad interface name {name:?}")));
+    }
+    if cfg!(target_os = "macos")
+        && !name.strip_prefix("utun").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(Error::Invalid(format!("macOS tunnel names must look like utun7, got {name:?}")));
+    }
+    Ok(())
 }
 
 /// Codecs keyed by peer id.
@@ -83,5 +107,19 @@ async fn pump_inbound(
             }
         };
         dev.send(&packet).await?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interface_names() {
+        assert!(validate_name("").is_err());
+        assert!(validate_name("a-name-that-is-way-too-long").is_err());
+        assert!(validate_name("bad/name").is_err());
+        assert!(validate_name("utun7").is_ok());
+        assert_eq!(validate_name("pvps0").is_ok(), cfg!(target_os = "linux"));
     }
 }

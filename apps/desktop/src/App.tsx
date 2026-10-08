@@ -39,6 +39,7 @@ export function App() {
           <button
             key={v.id}
             type="button"
+            aria-current={v.id === view ? "page" : undefined}
             onClick={() => setView(v.id)}
             className={cx("mb-1 rounded-lg px-3 py-2 text-left transition", v.id === view ? "bg-slate-800 text-white" : "text-slate-400 hover:bg-slate-900")}
           >

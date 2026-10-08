@@ -53,6 +53,7 @@ serde_json = "1"
 sha2 = "0.10"
 snow = { version = "0.10", features = ["risky-raw-split"] }
 subtle = "2"
+sysinfo = { version = "0.39", default-features = false, features = ["system", "network", "component"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"

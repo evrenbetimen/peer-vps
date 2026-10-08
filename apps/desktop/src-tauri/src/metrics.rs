@@ -1,29 +1,27 @@
-//! Host telemetry sampler. Reads `/proc` and `/sys` on Linux; on other
-//! platforms (until native probes land) it reports load-only estimates.
+//! Host telemetry sampler, backed by `sysinfo` so the same code reports real
+//! CPU, memory, network and temperature figures on Linux and macOS.
 
 use std::time::Duration;
 
 use peervps_core::events::HostMetrics;
 use peervps_core::storage::{now_secs, presence};
 use peervps_core::{Node, NodeEvent};
+use sysinfo::{Components, Networks, System};
 
 const PERIOD: Duration = Duration::from_millis(250);
 
 pub async fn run(node: Node, provider: String) {
     let mut tick = tokio::time::interval(PERIOD);
-    let mut last_net = read_net();
+    let mut probes = Probes::new();
+    let mut last_net = probes.net();
     loop {
         tick.tick().await;
-        let net = read_net();
+        let net = probes.net();
         let secs = PERIOD.as_secs_f64();
-        let (rx_bps, tx_bps) = match (last_net, net) {
-            (Some((r0, t0)), Some((r1, t1))) => {
-                (((r1.saturating_sub(r0)) as f64 / secs) as u64, ((t1.saturating_sub(t0)) as f64 / secs) as u64)
-            }
-            _ => (0, 0),
-        };
+        let rx_bps = (net.0.saturating_sub(last_net.0) as f64 / secs) as u64;
+        let tx_bps = (net.1.saturating_sub(last_net.1) as f64 / secs) as u64;
         last_net = net;
-        let (mem_total, mem_avail) = read_mem().unwrap_or((16 * 1024, 8 * 1024));
+        let (mem_total, mem_avail) = probes.mem();
         let p = provider.clone();
         // Rolling 30 days, or since the node was first seen if that is more recent.
         let sla = node
@@ -39,8 +37,8 @@ pub async fn run(node: Node, provider: String) {
             .map(|r| r * 100.0)
             .unwrap_or(0.0);
         node.events.publish(NodeEvent::Metrics(HostMetrics {
-            cpu_load_pct: read_load().unwrap_or(0.0),
-            cpu_temp_c: read_temp().unwrap_or(0.0),
+            cpu_load_pct: probes.cpu_load(),
+            cpu_temp_c: probes.temp().unwrap_or(0.0),
             mem_used_mib: mem_total.saturating_sub(mem_avail),
             mem_total_mib: mem_total,
             running_vms: node.running_vms().await as u32,
@@ -51,45 +49,77 @@ pub async fn run(node: Node, provider: String) {
     }
 }
 
-fn read_load() -> Option<f32> {
-    let s = std::fs::read_to_string("/proc/loadavg").ok()?;
-    let one: f32 = s.split_whitespace().next()?.parse().ok()?;
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f32;
-    Some((one / cores * 100.0).min(100.0))
+/// Cross-platform probes (Linux `/proc`, macOS `host_statistics`/IOKit) via `sysinfo`.
+struct Probes {
+    sys: System,
+    nets: Networks,
+    comps: Components,
 }
 
-fn read_temp() -> Option<f32> {
-    let s = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp").ok()?;
-    Some(s.trim().parse::<f32>().ok()? / 1000.0)
-}
-
-/// (total MiB, available MiB)
-fn read_mem() -> Option<(u64, u64)> {
-    let s = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let field = |name: &str| -> Option<u64> {
-        s.lines().find(|l| l.starts_with(name))?.split_whitespace().nth(1)?.parse::<u64>().ok().map(|kib| kib / 1024)
-    };
-    Some((field("MemTotal:")?, field("MemAvailable:")?))
-}
-
-/// Sum of (rx bytes, tx bytes) over non-loopback interfaces.
-fn read_net() -> Option<(u64, u64)> {
-    let s = std::fs::read_to_string("/proc/net/dev").ok()?;
-    let mut rx = 0u64;
-    let mut tx = 0u64;
-    for line in s.lines().skip(2) {
-        let (iface, rest) = line.split_once(':')?;
-        if iface.trim() == "lo" {
-            continue;
+impl Probes {
+    fn new() -> Self {
+        Self {
+            sys: System::new(),
+            nets: Networks::new_with_refreshed_list(),
+            comps: Components::new_with_refreshed_list(),
         }
-        let cols: Vec<u64> = rest.split_whitespace().filter_map(|c| c.parse().ok()).collect();
-        rx += cols.first().copied().unwrap_or(0);
-        tx += cols.get(8).copied().unwrap_or(0);
     }
-    Some((rx, tx))
+
+    fn cpu_load(&mut self) -> f32 {
+        self.sys.refresh_cpu_usage();
+        self.sys.global_cpu_usage().clamp(0.0, 100.0)
+    }
+
+    /// Hottest CPU-ish sensor; `None` where the OS exposes none (VMs, some Macs without privileges).
+    fn temp(&mut self) -> Option<f32> {
+        self.comps.refresh(false);
+        self.comps.iter().filter_map(|c| c.temperature()).filter(|t| t.is_finite() && *t > 0.0).reduce(f32::max)
+    }
+
+    /// (total MiB, available MiB)
+    fn mem(&mut self) -> (u64, u64) {
+        self.sys.refresh_memory();
+        (self.sys.total_memory() / MIB, self.sys.available_memory() / MIB)
+    }
+
+    /// Sum of (rx bytes, tx bytes) since boot over non-loopback interfaces.
+    fn net(&mut self) -> (u64, u64) {
+        self.nets.refresh(true);
+        self.nets
+            .iter()
+            .filter(|(name, _)| !is_loopback(name))
+            .fold((0, 0), |(rx, tx), (_, d)| (rx + d.total_received(), tx + d.total_transmitted()))
+    }
+}
+
+const MIB: u64 = 1024 * 1024;
+
+fn is_loopback(name: &str) -> bool {
+    name == "lo" || name == "lo0"
 }
 
 /// Physical RAM in MiB, for the allocation sliders.
 pub fn host_mem_mib() -> u64 {
-    read_mem().map(|(t, _)| t).unwrap_or(16 * 1024)
+    let mut sys = System::new();
+    sys.refresh_memory();
+    match sys.total_memory() / MIB {
+        0 => 16 * 1024,
+        n => n,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probes_report_plausible_values() {
+        let mut p = Probes::new();
+        let (total, avail) = p.mem();
+        assert!(total > 0 && avail <= total, "{total} {avail}");
+        assert!((0.0..=100.0).contains(&p.cpu_load()));
+        let _ = p.net();
+        assert!(host_mem_mib() > 0);
+        assert!(is_loopback("lo") && is_loopback("lo0") && !is_loopback("en0") && !is_loopback("eth0"));
+    }
 }

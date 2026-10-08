@@ -96,6 +96,7 @@ export function RenterConsole() {
               <button
                 key={t.image}
                 type="button"
+                aria-pressed={t.image === template.image}
                 onClick={() => setTemplate(t)}
                 className={cx(
                   "rounded-lg border p-3 text-left transition",
@@ -214,11 +215,12 @@ function Picker<T extends number>({ label, options, value, fmt, onChange }: { la
   return (
     <div className="flex items-center justify-between gap-3">
       <span className="w-20 text-slate-400">{label}</span>
-      <div className="flex flex-1 flex-wrap justify-end gap-1">
+      <div role="group" aria-label={label} className="flex flex-1 flex-wrap justify-end gap-1">
         {options.map((o) => (
           <button
             key={o}
             type="button"
+            aria-pressed={o === value}
             onClick={() => onChange(o)}
             className={cx("rounded-md px-2 py-1 font-mono text-xs", o === value ? "bg-cyan-500 text-slate-950" : "bg-slate-800 text-slate-300 hover:bg-slate-700")}
           >
