@@ -57,10 +57,10 @@ impl WebhookVerifier {
         }
         // Multiple v1 entries are allowed during secret rotation.
         for sig in sigs {
-            if let Ok(raw) = hex::decode(sig) {
-                if self.mac(ts, body).verify_slice(&raw).is_ok() {
-                    return Ok(());
-                }
+            if let Ok(raw) = hex::decode(sig)
+                && self.mac(ts, body).verify_slice(&raw).is_ok()
+            {
+                return Ok(());
             }
         }
         Err(Error::Unauthorized("webhook: bad signature".into()))

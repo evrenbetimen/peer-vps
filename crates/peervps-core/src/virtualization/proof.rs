@@ -79,7 +79,7 @@ fn run_segment(mut state: [u8; 32], steps: u64) -> [u8; 32] {
 
 impl ComputeProver for HashChainProver {
     fn prove(&self, c: &Challenge) -> Result<ComputeProof> {
-        if c.stride == 0 || c.steps == 0 || c.steps % c.stride != 0 {
+        if c.stride == 0 || c.steps == 0 || !c.steps.is_multiple_of(c.stride) {
             return Err(Error::Invalid("steps must be a positive multiple of stride".into()));
         }
         let start = Instant::now();

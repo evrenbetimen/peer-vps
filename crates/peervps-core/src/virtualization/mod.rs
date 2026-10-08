@@ -323,10 +323,10 @@ fn validate_spec(spec: &VmSpec) -> Result<()> {
     if spec.disk_gib == 0 {
         return Err(Error::Invalid("disk_gib must be > 0".into()));
     }
-    if let Some(req) = &spec.accelerator {
-        if req.kind == AcceleratorKind::None {
-            return Err(Error::Invalid("accelerator kind must not be None".into()));
-        }
+    if let Some(req) = &spec.accelerator
+        && req.kind == AcceleratorKind::None
+    {
+        return Err(Error::Invalid("accelerator kind must not be None".into()));
     }
     Ok(())
 }

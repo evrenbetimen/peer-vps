@@ -136,12 +136,11 @@ pub async fn query(socket: &UdpSocket, server: SocketAddr, timeout: Duration) ->
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
         socket.send_to(&req, server).await?;
-        if let Ok(Ok((n, from))) = tokio::time::timeout(wait, socket.recv_from(&mut buf)).await {
-            if from == server {
-                if let Ok(addr) = parse_binding_response(&tid, &buf[..n]) {
-                    return Ok(addr);
-                }
-            }
+        if let Ok(Ok((n, from))) = tokio::time::timeout(wait, socket.recv_from(&mut buf)).await
+            && from == server
+            && let Ok(addr) = parse_binding_response(&tid, &buf[..n])
+        {
+            return Ok(addr);
         }
         wait = (wait * 2).min(Duration::from_secs(1));
     }
