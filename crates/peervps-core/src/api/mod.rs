@@ -16,6 +16,7 @@
 //! | POST   | `/v1/instances/{id}/scale`     | `{"replicas":0|1}`                   |
 //! | DELETE | `/v1/instances/{id}`           | terminate                            |
 //! | GET    | `/v1/instances/{id}/console`   | tail of the guest serial console     |
+//! | GET    | `/v1/instances/{id}/access`    | SSH endpoint, user and password      |
 //! | GET    | `/v1/account`                  | balance + ledger                     |
 //! | POST   | `/v1/webhooks/{gateway}`       | signed payment top-ups (no bearer)   |
 
@@ -99,6 +100,7 @@ pub fn router(node: Node) -> Router {
         .route("/v1/instances/{id}", get(get_instance).delete(terminate))
         .route("/v1/instances/{id}/scale", post(scale))
         .route("/v1/instances/{id}/console", get(console))
+        .route("/v1/instances/{id}/access", get(access))
         .route("/v1/account", get(account))
         .route("/v1/webhooks/{gateway}", post(webhook))
         .with_state(node)
@@ -176,6 +178,16 @@ struct Console {
 
 async fn console(State(node): State<Node>, Caller(who): Caller, Path(id): Path<String>) -> ApiResult<Console> {
     Ok(Json(Console { console: node.console(&who, &id, 64 * 1024).await? }))
+}
+
+#[derive(Debug, Serialize)]
+struct Access {
+    /// `null` when the hypervisor backend gives guests no SSH endpoint.
+    access: Option<crate::virtualization::GuestAccess>,
+}
+
+async fn access(State(node): State<Node>, Caller(who): Caller, Path(id): Path<String>) -> ApiResult<Access> {
+    Ok(Json(Access { access: node.access(&who, &id).await? }))
 }
 
 async fn account(State(node): State<Node>, Caller(who): Caller) -> ApiResult<AccountSummary> {

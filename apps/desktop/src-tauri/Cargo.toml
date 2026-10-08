@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 peervps-core.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sysinfo.workspace = true

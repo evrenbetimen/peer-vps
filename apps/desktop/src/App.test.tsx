@@ -39,6 +39,8 @@ describe("App", () => {
 
     expect(await screen.findByTestId("terminal")).toHaveTextContent(/shell 10\.147\.0\.\d+/);
     expect(await screen.findByText(/1 active/)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /^ssh -p \d+ peervps@127\.0\.0\.1$/ })).toBeInTheDocument();
+    expect(screen.getByText("mock-password")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Scale to 0" }));
     expect(await screen.findByText("scaledToZero")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Resume" }));
@@ -64,5 +66,15 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: /^Wallet/ }));
     await user.click(await screen.findByRole("button", { name: "+25 cr" }));
     expect(await screen.findByText("Top-up")).toBeInTheDocument();
+  });
+
+  it("lists guest images and downloads one from the catalog", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const debian = await screen.findByTestId("image-debian-13");
+    expect(within(await screen.findByTestId("image-ubuntu-24.04")).getByText(/installed/)).toBeInTheDocument();
+    await user.click(within(debian).getByRole("button", { name: "Download" }));
+    expect(await within(screen.getByTestId("image-debian-13")).findByText(/downloading/)).toBeInTheDocument();
+    expect(await within(screen.getByTestId("image-debian-13")).findByText(/installed/, {}, { timeout: 5000 })).toBeInTheDocument();
   });
 });

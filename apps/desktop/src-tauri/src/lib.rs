@@ -8,6 +8,7 @@
 
 mod commands;
 mod demo;
+mod images;
 mod metrics;
 mod pump;
 
@@ -16,6 +17,8 @@ use std::sync::Arc;
 use peervps_core::Node;
 use peervps_core::storage::presence::{self, PresenceEvent};
 use peervps_core::storage::{Store, now_secs};
+use peervps_core::virtualization::Hypervisor;
+use peervps_core::virtualization::mock::MockHypervisor;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
@@ -27,6 +30,24 @@ pub struct AppState {
     pub provider: String,
     pub allocation: Mutex<commands::HostAllocation>,
     pub demo: Arc<demo::DemoTopology>,
+    pub images: images::ImageStore,
+    /// Why guests are simulated instead of real VMs (QEMU missing), shown in the Host view.
+    pub hypervisor_note: Option<String>,
+}
+
+/// Real VMs through QEMU when it is installed; the in-memory simulator otherwise.
+fn pick_hypervisor(data_dir: &std::path::Path) -> (Arc<dyn Hypervisor>, Option<String>) {
+    use peervps_core::virtualization::qemu::{QemuConfig, QemuHypervisor};
+    match QemuConfig::detect(data_dir.join("images"), data_dir.join("vms")).and_then(QemuHypervisor::new) {
+        Ok(hv) => {
+            tracing::info!(binary = %hv.config().binary.display(), accel = ?hv.config().accel, "running guests with QEMU");
+            (Arc::new(hv), None)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "QEMU unavailable; guests are simulated");
+            (Arc::new(MockHypervisor::default()), Some(e.to_string()))
+        }
+    }
 }
 
 pub fn run() {
@@ -39,7 +60,8 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let store = Store::open(data_dir.join("node.db"))?;
-            let (node, _key) = tauri::async_runtime::block_on(Node::demo_with(store))?;
+            let (hypervisor, hypervisor_note) = pick_hypervisor(&data_dir);
+            let (node, _key) = tauri::async_runtime::block_on(Node::demo_with_hypervisor(store, hypervisor))?;
             let provider = node.config.node_id.clone();
             node.store.with(|c| presence::record(c, &provider, PresenceEvent::Online, now_secs()))?;
             // Start by offering at most half the machine; the provider widens it with the sliders.
@@ -73,6 +95,8 @@ pub fn run() {
                 provider,
                 allocation: Mutex::new(allocation),
                 demo,
+                images: images::ImageStore::new(data_dir.join("images")),
+                hypervisor_note,
             });
             Ok(())
         })
@@ -89,6 +113,10 @@ pub fn run() {
             commands::get_topology,
             commands::kill_peer,
             commands::restore_peer,
+            commands::get_instance_access,
+            commands::get_console,
+            images::list_images,
+            images::pull_image,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {

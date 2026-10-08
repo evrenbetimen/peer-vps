@@ -35,6 +35,7 @@ use serde_json::json;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
+use super::affinity::pin;
 use super::{Hypervisor, Placement, VmId, VmSnapshot, VmSpec};
 use crate::{Error, Result};
 use api::ApiClient;
@@ -343,24 +344,6 @@ fn tail(s: &str, n: usize) -> &str {
     let start = s.len().saturating_sub(n);
     let start = (start..s.len()).find(|i| s.is_char_boundary(*i)).unwrap_or(s.len());
     &s[start..]
-}
-
-/// Pin the Firecracker process (and the vCPU threads it will spawn) to `cores`.
-fn pin(pid: u32, cores: &[u32]) {
-    if cores.is_empty() {
-        return;
-    }
-    let mut set = nix::sched::CpuSet::new();
-    for &c in cores {
-        if let Err(e) = set.set(c as usize) {
-            tracing::warn!(core = c, error = %e, "cannot pin to core");
-            return;
-        }
-    }
-    let pid = nix::unistd::Pid::from_raw(pid as i32);
-    if let Err(e) = nix::sched::sched_setaffinity(pid, &set) {
-        tracing::warn!(?cores, error = %e, "sched_setaffinity failed; vm runs unpinned");
-    }
 }
 
 /// Linux interface names are limited to 15 bytes.

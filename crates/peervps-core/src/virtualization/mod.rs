@@ -8,17 +8,23 @@
 //! * [`kvm::KvmHypervisor`] — direct `/dev/kvm` via `kvm-ioctls` (Linux only).
 //! * [`firecracker::FirecrackerHypervisor`] — one Firecracker process per guest;
 //!   boots real kernels, pauses, snapshots and restores (Linux only).
-//! * [`mock::MockHypervisor`] — in-memory backend for tests, CI and non-Linux hosts.
+//! * [`qemu::QemuHypervisor`] — one QEMU process per guest with the host's native
+//!   accelerator (KVM on Linux, Hypervisor.framework on macOS, WHPX on Windows);
+//!   boots stock cloud images with SSH access on every desktop OS.
+//! * [`mock::MockHypervisor`] — in-memory backend for tests, CI and hosts without a hypervisor.
 //!
 
 pub mod accel;
+pub mod affinity;
 pub mod confidential;
 #[cfg(target_os = "linux")]
 pub mod firecracker;
+pub mod images;
 #[cfg(target_os = "linux")]
 pub mod kvm;
 pub mod mock;
 pub mod proof;
+pub mod qemu;
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -99,6 +105,23 @@ pub struct VmSnapshot {
     pub bytes: Vec<u8>,
 }
 
+/// How a renter reaches a running guest from the host it runs on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuestAccess {
+    pub ssh_host: String,
+    pub ssh_port: u16,
+    pub user: String,
+    /// Set when the guest was provisioned with password login.
+    pub password: Option<String>,
+}
+
+impl GuestAccess {
+    pub fn ssh_command(&self) -> String {
+        format!("ssh -p {} {}@{}", self.ssh_port, self.user, self.ssh_host)
+    }
+}
+
 /// Hypervisor backend contract. Implementations must be cheap to share.
 #[async_trait]
 pub trait Hypervisor: Send + Sync + fmt::Debug {
@@ -113,6 +136,10 @@ pub trait Hypervisor: Send + Sync + fmt::Debug {
     async fn destroy(&self, id: VmId) -> Result<()>;
     /// Last `max_bytes` of the guest's serial console, if the backend captures it.
     async fn console_tail(&self, _id: VmId, _max_bytes: usize) -> Result<Option<String>> {
+        Ok(None)
+    }
+    /// SSH endpoint for the guest, if the backend wires one up.
+    async fn access(&self, _id: VmId) -> Result<Option<GuestAccess>> {
         Ok(None)
     }
 }

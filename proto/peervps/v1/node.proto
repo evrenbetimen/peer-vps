@@ -13,6 +13,7 @@ service NodeService {
   rpc Scale(ScaleRequest) returns (Instance);
   rpc Terminate(TerminateRequest) returns (Instance);
   rpc GetConsole(GetConsoleRequest) returns (Console);
+  rpc GetAccess(GetAccessRequest) returns (Access);
   rpc GetAccount(GetAccountRequest) returns (Account);
   // Server-streamed node events (metrics, balance, route and failover changes).
   rpc WatchEvents(WatchEventsRequest) returns (stream NodeEvent);
@@ -99,6 +100,14 @@ message TerminateRequest { string id = 1; }
 message GetAccountRequest {}
 message GetConsoleRequest { string id = 1; }
 message Console { optional string console = 1; } // unset when the backend has no serial capture
+message GetAccessRequest { string id = 1; }
+message GuestAccess {
+  string ssh_host = 1;
+  uint32 ssh_port = 2;
+  string user = 3;
+  optional string password = 4;
+}
+message Access { optional GuestAccess access = 1; } // unset when the backend exposes no SSH endpoint
 
 message LedgerEntry {
   int64 id = 1;

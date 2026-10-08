@@ -2773,6 +2773,7 @@ name = "peervps-desktop"
 version = "0.1.0"
 dependencies = [
  "peervps-core",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sysinfo",

@@ -71,6 +71,13 @@ enum Cmd {
     Status { id: Option<String> },
     /// Tail of the instance's serial console.
     Console { id: String },
+    /// SSH endpoint, user and password for an instance (QEMU backend).
+    Access { id: String },
+    /// Manage guest disk images for the QEMU backend.
+    Image {
+        #[command(subcommand)]
+        cmd: ImageCmd,
+    },
     /// Scale an instance to 0 (hibernate, stop billing) or 1.
     Scale { id: String, replicas: u32 },
     /// Terminate an instance.
@@ -79,10 +86,29 @@ enum Cmd {
     Account,
 }
 
+#[derive(Debug, Subcommand)]
+enum ImageCmd {
+    /// Download a cloud image (checksum-verified) into the image directory.
+    Pull {
+        /// ubuntu-24.04 | ubuntu-22.04 | debian-13
+        name: String,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// List installed images and the downloadable catalog.
+    List {
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum Backend {
     /// In-memory simulation; runs anywhere.
     Mock,
+    /// Real VMs on Linux, macOS or Windows via QEMU with the host's accelerator
+    /// (KVM / Hypervisor.framework / WHPX). Images: `peervps image pull`.
+    Qemu,
     /// Real MicroVMs via Firecracker (Linux + /dev/kvm). See scripts/fetch-firecracker-assets.sh.
     Firecracker,
 }
@@ -100,9 +126,15 @@ struct HypervisorArgs {
     /// Directory of `<image>.ext4` root filesystems.
     #[arg(long)]
     fc_images: Option<PathBuf>,
-    /// Per-VM working directory (sockets, disks, snapshots, console logs).
-    #[arg(long, default_value = "/var/lib/peervps/vms")]
-    run_dir: PathBuf,
+    /// QEMU image directory (`<name>.qcow2`); defaults to `<data dir>/images`.
+    #[arg(long)]
+    images: Option<PathBuf>,
+    /// Public key file(s) authorized in QEMU guests, e.g. ~/.ssh/id_ed25519.pub.
+    #[arg(long = "ssh-key")]
+    ssh_keys: Vec<PathBuf>,
+    /// Per-VM working directory (disks, snapshots, console logs); defaults to `<data dir>/vms`.
+    #[arg(long)]
+    run_dir: Option<PathBuf>,
     /// Attach each guest's tap device to this bridge (guests get no NIC when omitted).
     #[arg(long)]
     bridge: Option<String>,
@@ -112,7 +144,65 @@ impl HypervisorArgs {
     fn build(self) -> Result<std::sync::Arc<dyn peervps_core::virtualization::Hypervisor>> {
         match self.hypervisor {
             Backend::Mock => Ok(std::sync::Arc::new(peervps_core::virtualization::mock::MockHypervisor::default())),
+            Backend::Qemu => qemu(self),
             Backend::Firecracker => firecracker(self),
+        }
+    }
+}
+
+/// Per-user data directory: `~/.local/share/peervps`, `~/Library/Application Support/PeerVPS`
+/// or `%LOCALAPPDATA%\PeerVPS`.
+fn data_dir() -> PathBuf {
+    let home = || std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("PeerVPS")
+    } else if cfg!(target_os = "macos") {
+        home().join("Library/Application Support/PeerVPS")
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join(".local/share"))
+            .join("peervps")
+    }
+}
+
+fn images_dir(dir: Option<PathBuf>) -> PathBuf {
+    dir.unwrap_or_else(|| data_dir().join("images"))
+}
+
+fn qemu(a: HypervisorArgs) -> Result<std::sync::Arc<dyn peervps_core::virtualization::Hypervisor>> {
+    use peervps_core::virtualization::qemu::{QemuConfig, QemuHypervisor};
+    let mut cfg = QemuConfig::detect(images_dir(a.images), a.run_dir.unwrap_or_else(|| data_dir().join("vms")))?;
+    for path in a.ssh_keys {
+        let key = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        cfg.ssh_keys.extend(key.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned));
+    }
+    eprintln!("images: {}", cfg.images_dir.display());
+    Ok(std::sync::Arc::new(QemuHypervisor::new(cfg)?))
+}
+
+async fn image(cmd: ImageCmd) -> Result<Value> {
+    use peervps_core::virtualization::images;
+    match cmd {
+        ImageCmd::Pull { name, dir } => {
+            let dir = images_dir(dir);
+            let mut last = 0u64;
+            let path = images::pull(&reqwest::Client::new(), &dir, &name, |done, total| {
+                // One progress line per ~32 MiB keeps stderr readable.
+                if done - last >= 32 << 20 || Some(done) == total {
+                    last = done;
+                    match total {
+                        Some(t) => eprintln!("{name}: {} / {} MiB", done >> 20, t >> 20),
+                        None => eprintln!("{name}: {} MiB", done >> 20),
+                    }
+                }
+            })
+            .await?;
+            Ok(json!({ "image": name, "path": path }))
+        }
+        ImageCmd::List { dir } => {
+            let dir = images_dir(dir);
+            Ok(json!({ "dir": dir, "installed": images::list(&dir)?, "catalog": images::CATALOG }))
         }
     }
 }
@@ -125,7 +215,7 @@ fn firecracker(a: HypervisorArgs) -> Result<std::sync::Arc<dyn peervps_core::vir
     let binary = a.fc_binary.or_else(find_binary).context("firecracker not found on PATH; pass --fc-binary")?;
     let kernel = a.fc_kernel.context("--fc-kernel is required with --hypervisor firecracker")?;
     let images = a.fc_images.context("--fc-images is required with --hypervisor firecracker")?;
-    let mut cfg = FirecrackerConfig::new(binary, kernel, images, a.run_dir);
+    let mut cfg = FirecrackerConfig::new(binary, kernel, images, a.run_dir.unwrap_or_else(|| data_dir().join("vms")));
     cfg.network = a.bridge.map(|bridge| BridgeNetwork { bridge });
     Ok(std::sync::Arc::new(FirecrackerHypervisor::new(cfg)?))
 }
@@ -183,6 +273,22 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
+        Cmd::Access { id } => {
+            let out = client.get(&format!("/v1/instances/{id}/access"), &[]).await?;
+            match out.get("access") {
+                Some(a) if !a.is_null() => {
+                    let cmd = format!(
+                        "ssh -p {} {}@{}",
+                        a["sshPort"],
+                        a["user"].as_str().unwrap_or_default(),
+                        a["sshHost"].as_str().unwrap_or_default()
+                    );
+                    json!({ "access": a, "command": cmd })
+                }
+                _ => bail!("this node's hypervisor gives guests no SSH endpoint"),
+            }
+        }
+        Cmd::Image { cmd } => image(cmd).await?,
         Cmd::Terminate { id } => client.delete(&format!("/v1/instances/{id}")).await?,
         Cmd::Account => client.get("/v1/account", &[]).await?,
     };

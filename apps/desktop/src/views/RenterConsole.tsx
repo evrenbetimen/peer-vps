@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { BridgeError, commands } from "../bridge/commands";
 import { useLive } from "../bridge/events";
-import type { AcceleratorKind, Instance, Offer, OfferQuery, VmSpec } from "../bridge/types";
+import type { AcceleratorKind, GuestAccess, Instance, Offer, OfferQuery, VmSpec } from "../bridge/types";
 import { Button, Card, ErrorNote } from "../components/ui";
 import { credits, cx, mib, perHour } from "../lib/format";
 
@@ -18,11 +18,11 @@ const Terminal = lazy(() => import("../components/Terminal").then((m) => ({ defa
 
 const TEMPLATES: Template[] = [
   { image: "ubuntu-24.04", name: "Ubuntu 24.04", blurb: "Minimal server", accelerator: "none" },
+  { image: "ubuntu-22.04", name: "Ubuntu 22.04", blurb: "Previous LTS", accelerator: "none" },
   { image: "debian-13", name: "Debian 13", blurb: "Stable base", accelerator: "none" },
   { image: "ubuntu-24.04-cuda", name: "Ubuntu + CUDA", blurb: "Drivers + toolkit", accelerator: "gpu" },
   { image: "vllm-llama", name: "vLLM inference", blurb: "OpenAI-compatible LLM server", accelerator: "gpu" },
   { image: "npu-runtime", name: "NPU runtime", blurb: "ONNX on edge NPUs", accelerator: "npu" },
-  { image: "alpine-3.22", name: "Alpine", blurb: "Tiny agent sandbox", accelerator: "none" },
 ];
 
 const RAM = [1024, 2048, 4096, 8192, 16384, 32768];
@@ -180,6 +180,7 @@ export function RenterConsole() {
                   <div className="text-xs text-slate-400">
                     {i.spec.image} · {i.virtualIp} · {perHour(i.pricePerSec)} · <span className={cx(i.state === "running" ? "text-emerald-400" : "text-slate-500")}>{i.state}</span>
                   </div>
+                  {i.state !== "terminated" && <AccessLine instance={i} />}
                 </div>
                 {i.state !== "terminated" && (
                   <div className="flex gap-1.5">
@@ -228,6 +229,36 @@ function Picker<T extends number>({ label, options, value, fmt, onChange }: { la
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+/** SSH command and password for a guest, when the node's hypervisor exposes one. */
+function AccessLine({ instance }: { instance: Instance }) {
+  const [access, setAccess] = useState<GuestAccess | null>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    commands.getInstanceAccess(instance.id).then(setAccess, () => setAccess(null));
+  }, [instance.id, instance.state]);
+  if (!access) return null;
+  const cmd = `ssh -p ${access.sshPort} ${access.user}@${access.sshHost}`;
+  const copy = () => {
+    void navigator.clipboard?.writeText(cmd).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    });
+  };
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-2 text-xs">
+      <button type="button" onClick={copy} className="font-mono text-cyan-300 hover:underline" title="Copy">
+        {cmd}
+      </button>
+      {copied && <span className="text-emerald-400">copied</span>}
+      {access.password && (
+        <span className="text-slate-400">
+          password <span className="font-mono text-slate-200">{access.password}</span>
+        </span>
+      )}
     </div>
   );
 }

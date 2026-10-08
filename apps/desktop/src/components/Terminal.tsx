@@ -4,14 +4,15 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 
+import { commands, inTauri } from "../bridge/commands";
 import type { Instance } from "../bridge/types";
 
 /**
- * Web terminal bound to a guest's virtual IP.
+ * Web terminal for a guest.
  *
- * The SSH transport (client ⇄ Noise tunnel ⇄ guest :22) is not wired yet, so
- * this runs a tiny local shell that explains where it will connect. The xterm
- * instance, sizing and input handling are the real ones.
+ * In the desktop app it streams the guest's real serial console (boot log,
+ * cloud-init, login prompt); log in over the SSH command shown next to the
+ * instance. The browser preview has no guest, so it runs a tiny local shell.
  */
 export function Terminal({ instance }: { instance: Instance }) {
   const host = useRef<HTMLDivElement>(null);
@@ -28,6 +29,18 @@ export function Terminal({ instance }: { instance: Instance }) {
     term.loadAddon(fit);
     term.open(host.current);
     fit.fit();
+    const ro = new ResizeObserver(() => fit.fit());
+    ro.observe(host.current);
+
+    if (inTauri) {
+      const stop = streamConsole(term, instance);
+      return () => {
+        stop();
+        ro.disconnect();
+        term.dispose();
+      };
+    }
+
     const prompt = () => term.write(`\r\n\x1b[36mubuntu@${instance.virtualIp}\x1b[0m:~$ `);
     term.writeln(`\x1b[90mpeervps ssh ${instance.id} → ${instance.virtualIp}:22 (${instance.spec.image})\x1b[0m`);
     term.writeln("\x1b[33mOverlay SSH transport not connected yet; local echo shell for now.\x1b[0m");
@@ -57,8 +70,6 @@ export function Terminal({ instance }: { instance: Instance }) {
         }
       }
     });
-    const ro = new ResizeObserver(() => fit.fit());
-    ro.observe(host.current);
     return () => {
       ro.disconnect();
       sub.dispose();
@@ -67,4 +78,35 @@ export function Terminal({ instance }: { instance: Instance }) {
   }, [instance]);
 
   return <div ref={host} className="h-72 w-full overflow-hidden rounded-lg border border-slate-800 bg-slate-950 p-2" />;
+}
+
+/** Poll the serial console and append what is new; returns a stop function. */
+function streamConsole(term: XTerm, instance: Instance): () => void {
+  let shown = "";
+  let stopped = false;
+  term.writeln(`\x1b[90mserial console of ${instance.id} (read-only)\x1b[0m`);
+  const tick = async () => {
+    try {
+      const text = await commands.getConsole(instance.id);
+      if (stopped) return;
+      if (text === null) {
+        term.writeln("\x1b[33mThis node's hypervisor does not capture a console.\x1b[0m");
+        return;
+      }
+      // The backend returns a bounded tail; append the new suffix, or redraw if the window moved.
+      if (text.startsWith(shown)) term.write(text.slice(shown.length).replace(/\r?\n/g, "\r\n"));
+      else {
+        term.clear();
+        term.write(text.replace(/\r?\n/g, "\r\n"));
+      }
+      shown = text;
+    } catch {
+      // Instance gone or scaled to zero; keep polling quietly.
+    }
+    if (!stopped) setTimeout(() => void tick(), 1000);
+  };
+  void tick();
+  return () => {
+    stopped = true;
+  };
 }

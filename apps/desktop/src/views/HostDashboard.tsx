@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { commands } from "../bridge/commands";
 import { useLive } from "../bridge/events";
 import type { HostAllocation, HostSnapshot } from "../bridge/types";
+import { InstallQemu, LocalImages } from "../components/LocalImages";
 import { Button, Card, ErrorNote, Slider, Sparkline, Stat, Toggle } from "../components/ui";
 import { bytesPerSec, credits, mib, perHour } from "../lib/format";
 
@@ -132,6 +133,8 @@ export function HostDashboard() {
             Free: {snap.freeCores} cores · {mib(snap.freeMemMib)} · {snap.freeDiskGib} GiB
           </p>
         </Card>
+        {snap.hypervisorNote && <InstallQemu reason={snap.hypervisorNote} />}
+        <LocalImages />
       </div>
     </div>
   );

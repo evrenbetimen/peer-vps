@@ -103,4 +103,29 @@ describe("browser mock bridge", () => {
     expect(start - end).toBeGreaterThanOrEqual(550);
     expect(start - end).toBeLessThanOrEqual(560);
   });
+
+  it("exposes SSH access for live instances only", async () => {
+    const m = await freshMock();
+    const inst = await call<Instance>(m, "deploy_instance", { request: { offerId: "fra-cpu-1", spec } });
+    const access = await call<{ sshPort: number; user: string } | null>(m, "get_instance_access", { id: inst.id });
+    expect(access).toMatchObject({ user: "peervps" });
+    await call(m, "terminate_instance", { id: inst.id });
+    expect(await call(m, "get_instance_access", { id: inst.id })).toBeNull();
+  });
+
+  it("downloads catalog images with progress", async () => {
+    const m = await freshMock();
+    type Imgs = { installed: { name: string }[]; downloads: Record<string, { done: number; total: number }> };
+    const before = await call<Imgs>(m, "list_images");
+    expect(before.installed.map((i) => i.name)).toEqual(["ubuntu-24.04"]);
+    await call(m, "pull_image", { name: "debian-13" });
+    await vi.advanceTimersByTimeAsync(200);
+    const mid = await call<Imgs>(m, "list_images");
+    expect(mid.downloads["debian-13"]!.done).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(3000);
+    const after = await call<Imgs>(m, "list_images");
+    expect(after.installed.map((i) => i.name)).toContain("debian-13");
+    expect(after.downloads).toEqual({});
+    await expect(call(m, "pull_image", { name: "windows-11" })).rejects.toMatchObject({ code: "not_found" });
+  });
 });

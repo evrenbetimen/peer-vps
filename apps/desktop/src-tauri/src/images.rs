@@ -1,0 +1,96 @@
+//! Guest image management for the Host view: what is installed, what can be
+//! downloaded, and background downloads with progress the UI polls.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use peervps_core::Error;
+use peervps_core::virtualization::images::{self, CATALOG, CatalogImage, LocalImage};
+use serde::Serialize;
+use tauri::State;
+use tokio::sync::Mutex;
+
+use crate::AppState;
+use crate::commands::CmdError;
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Download {
+    done: u64,
+    total: Option<u64>,
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct ImageStore {
+    dir: PathBuf,
+    http: reqwest::Client,
+    downloads: Arc<Mutex<HashMap<String, Download>>>,
+}
+
+impl ImageStore {
+    pub fn new(dir: PathBuf) -> Self {
+        Self { dir, http: reqwest::Client::new(), downloads: Arc::default() }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Images {
+    dir: PathBuf,
+    installed: Vec<LocalImage>,
+    catalog: &'static [CatalogImage],
+    downloads: HashMap<String, Download>,
+}
+
+#[tauri::command]
+pub async fn list_images(state: State<'_, AppState>) -> Result<Images, CmdError> {
+    let s = &state.images;
+    Ok(Images {
+        dir: s.dir.clone(),
+        installed: images::list(&s.dir)?,
+        catalog: CATALOG,
+        downloads: s.downloads.lock().await.clone(),
+    })
+}
+
+/// Start downloading a catalog image; progress shows up in `list_images`.
+#[tauri::command]
+pub async fn pull_image(state: State<'_, AppState>, name: String) -> Result<(), CmdError> {
+    if CatalogImage::get(&name).is_none() {
+        return Err(Error::NotFound(format!("no catalog image {name:?}")).into());
+    }
+    let s = &state.images;
+    {
+        let mut downloads = s.downloads.lock().await;
+        if downloads.get(&name).is_some_and(|d| d.error.is_none()) {
+            return Ok(()); // already running
+        }
+        downloads.insert(name.clone(), Download::default());
+    }
+    let (dir, http, downloads) = (s.dir.clone(), s.http.clone(), s.downloads.clone());
+    tauri::async_runtime::spawn(async move {
+        let progress = {
+            let (downloads, name) = (downloads.clone(), name.clone());
+            move |done, total| {
+                // try_lock: never stall the download on a UI poll.
+                if let Ok(mut d) = downloads.try_lock() {
+                    d.insert(name.clone(), Download { done, total, error: None });
+                }
+            }
+        };
+        let result = images::pull(&http, &dir, &name, progress).await;
+        let mut d = downloads.lock().await;
+        match result {
+            Ok(_) => {
+                d.remove(&name);
+            }
+            Err(e) => {
+                tracing::warn!(image = %name, error = %e, "image download failed");
+                d.insert(name, Download { error: Some(e.to_string()), ..Download::default() });
+            }
+        }
+    });
+    Ok(())
+}
