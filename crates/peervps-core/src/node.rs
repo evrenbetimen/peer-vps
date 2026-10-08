@@ -1,0 +1,361 @@
+//! A fully wired PeerVPS node: the façade the REST API, CLI and desktop app share.
+
+use std::collections::HashMap;
+use std::net::Ipv4Addr;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex, RwLock};
+
+use crate::api::market::{Offer, OfferQuery, demo_offers};
+use crate::billing::payments::WebhookVerifier;
+use crate::billing::{AccountKind, Collateral, Ledger, LedgerEntry, MICROS_PER_CREDIT, UsageMeter};
+use crate::events::EventBus;
+use crate::failover::FailoverController;
+use crate::failover::heartbeat::HeartbeatConfig;
+use crate::failover::sla::{SlaEnforcer, SlaPolicy};
+use crate::network::{OVERLAY_NET, Route, RoutingTable};
+use crate::storage::{Store, now_secs};
+use crate::virtualization::accel::{AcceleratorDevice, AcceleratorKind, PartitionedAccelerators};
+use crate::virtualization::confidential::{self, MemoryEncryption, NoEncryption, SevSnpStub, TeeKind};
+use crate::virtualization::mock::MockHypervisor;
+use crate::virtualization::{HostBudget, Hypervisor, Provisioner, VmId, VmSpec, VmState};
+use crate::{Error, Result};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InstanceState {
+    Running,
+    ScaledToZero,
+    Terminated,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Instance {
+    pub id: String,
+    pub vm: VmId,
+    pub renter: String,
+    pub offer_id: String,
+    pub spec: VmSpec,
+    pub state: InstanceState,
+    pub virtual_ip: Ipv4Addr,
+    pub price_per_sec: i64,
+    pub created_at: i64,
+    #[serde(skip)]
+    billing_segment: u32,
+}
+
+impl Instance {
+    fn billing_id(&self) -> String {
+        format!("{}#{}", self.id, self.billing_segment)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployRequest {
+    pub offer_id: String,
+    pub spec: VmSpec,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSummary {
+    pub account: String,
+    pub balance: i64,
+    pub history: Vec<LedgerEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeConfig {
+    pub node_id: String,
+    pub budget: HostBudget,
+    pub fee_bps: i64,
+    pub min_collateral: i64,
+    pub webhook_secret: Vec<u8>,
+    /// Seconds of runway a renter must hold before deploying.
+    pub min_runway_secs: i64,
+}
+
+impl Default for NodeConfig {
+    fn default() -> Self {
+        Self {
+            node_id: "local".into(),
+            budget: HostBudget { cores: (0..8).collect(), mem_mib: 32 * 1024, disk_gib: 500 },
+            fee_bps: 500,
+            min_collateral: 100 * MICROS_PER_CREDIT,
+            webhook_secret: b"whsec_dev_only".to_vec(),
+            min_runway_secs: 60,
+        }
+    }
+}
+
+/// Everything a node runs, behind cheap clones.
+#[derive(Debug, Clone)]
+pub struct Node {
+    pub config: Arc<NodeConfig>,
+    pub events: EventBus,
+    pub store: Store,
+    pub ledger: Ledger,
+    pub meter: UsageMeter,
+    pub collateral: Collateral,
+    pub provisioner: Provisioner,
+    pub routes: RoutingTable,
+    pub failover: FailoverController,
+    pub webhooks: WebhookVerifier,
+    offers: Arc<RwLock<Vec<Offer>>>,
+    instances: Arc<Mutex<HashMap<String, Instance>>>,
+    api_keys: Arc<RwLock<HashMap<blake3::Hash, String>>>,
+    next_vip: Arc<Mutex<u32>>,
+}
+
+impl Node {
+    pub fn new(config: NodeConfig, store: Store, hypervisor: Arc<dyn Hypervisor>) -> Result<Self> {
+        let events = EventBus::default();
+        let ledger = Ledger::new(store.clone(), events.clone())?;
+        let meter = UsageMeter::new(ledger.clone(), config.fee_bps);
+        let collateral = Collateral::new(ledger.clone(), config.min_collateral);
+        let tee: Arc<dyn MemoryEncryption> = match confidential::probe_host() {
+            TeeKind::None => Arc::new(NoEncryption),
+            kind => Arc::new(SevSnpStub { kind }),
+        };
+        let accel = PartitionedAccelerators::new(vec![AcceleratorDevice {
+            id: "gpu0".into(),
+            kind: AcceleratorKind::Gpu,
+            model: "Simulated GPU".into(),
+            vram_mib: 24 * 1024,
+            slices: 4,
+        }]);
+        let provisioner = Provisioner::new(hypervisor, Arc::new(accel), tee, events.clone(), config.budget.clone());
+        let routes = RoutingTable::new(events.clone());
+        let sla = SlaEnforcer::new(store.clone(), collateral.clone(), SlaPolicy::default());
+        let failover = FailoverController::new(HeartbeatConfig::default(), routes.clone(), Some(sla), events.clone());
+        let webhooks = WebhookVerifier::new(config.webhook_secret.clone(), 300);
+        Ok(Self {
+            config: Arc::new(config),
+            events,
+            store,
+            ledger,
+            meter,
+            collateral,
+            provisioner,
+            routes,
+            failover,
+            webhooks,
+            offers: Arc::new(RwLock::new(Vec::new())),
+            instances: Arc::new(Mutex::new(HashMap::new())),
+            api_keys: Arc::new(RwLock::new(HashMap::new())),
+            next_vip: Arc::new(Mutex::new(10)),
+        })
+    }
+
+    /// In-memory node with the mock hypervisor, demo offers and a funded demo renter.
+    /// Returns the node and the demo renter's API key.
+    pub async fn demo() -> Result<(Self, String)> {
+        Self::demo_with(Store::in_memory()?).await
+    }
+
+    /// Like [`Self::demo`] but persisting to `store`. Seeding is skipped if the
+    /// demo accounts already exist, so restarting keeps balances.
+    pub async fn demo_with(store: Store) -> Result<(Self, String)> {
+        let node = Self::new(NodeConfig::default(), store, Arc::new(MockHypervisor::default()))?;
+        *node.offers.write().await = demo_offers();
+        let key = "pvps_demo_key".to_owned();
+        if node.ledger.balance("demo-agent").await.is_ok() {
+            node.create_renter("demo-agent", &key).await?;
+            return Ok((node, key));
+        }
+        node.ledger.open_account(&node.config.node_id, AccountKind::Provider).await?;
+        node.ledger.top_up(&node.config.node_id, 250 * MICROS_PER_CREDIT, "demo-seed-provider").await?;
+        node.collateral.lock(&node.config.node_id, 150 * MICROS_PER_CREDIT).await?;
+        node.create_renter("demo-agent", &key).await?;
+        node.ledger.top_up("demo-agent", 50 * MICROS_PER_CREDIT, "demo-seed-renter").await?;
+        Ok((node, key))
+    }
+
+    pub async fn create_renter(&self, account: &str, api_key: &str) -> Result<()> {
+        self.ledger.open_account(account, AccountKind::Renter).await?;
+        self.api_keys.write().await.insert(blake3::hash(api_key.as_bytes()), account.to_owned());
+        Ok(())
+    }
+
+    /// Resolve an API key to its account. Hash lookup avoids timing leaks on the key itself.
+    pub async fn authenticate(&self, api_key: &str) -> Result<String> {
+        self.api_keys
+            .read()
+            .await
+            .get(&blake3::hash(api_key.as_bytes()))
+            .cloned()
+            .ok_or_else(|| Error::Unauthorized("invalid api key".into()))
+    }
+
+    pub async fn publish_offer(&self, offer: Offer) {
+        let mut offers = self.offers.write().await;
+        offers.retain(|o| o.id != offer.id);
+        offers.push(offer);
+    }
+
+    pub async fn offers(&self, query: &OfferQuery) -> Vec<Offer> {
+        query.apply(&self.offers.read().await)
+    }
+
+    pub async fn deploy(&self, renter: &str, req: DeployRequest) -> Result<Instance> {
+        let offer = self
+            .offers
+            .read()
+            .await
+            .iter()
+            .find(|o| o.id == req.offer_id)
+            .cloned()
+            .ok_or_else(|| Error::NotFound(format!("offer {}", req.offer_id)))?;
+        if req.spec.vcpus > offer.vcpus || req.spec.mem_mib > offer.mem_mib || req.spec.disk_gib > offer.disk_gib {
+            return Err(Error::Capacity("spec exceeds the offer".into()));
+        }
+        let needed = offer.price_per_sec * self.config.min_runway_secs;
+        let available = self.ledger.balance(renter).await?;
+        if available < needed {
+            return Err(Error::InsufficientFunds { needed, available });
+        }
+
+        let vm = self.provisioner.provision(req.spec.clone()).await?;
+        let vip = {
+            let mut n = self.next_vip.lock().await;
+            *n += 1;
+            Ipv4Addr::from(u32::from(OVERLAY_NET) + *n)
+        };
+        self.routes.insert(
+            vip,
+            Route {
+                peer_id: offer.provider.clone(),
+                endpoint: "127.0.0.1:51820".parse().map_err(|_| Error::Invalid("endpoint".into()))?,
+                backup: None,
+            },
+        );
+        let instance = Instance {
+            id: format!("inst-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
+            vm: vm.id,
+            renter: renter.to_owned(),
+            offer_id: offer.id.clone(),
+            spec: req.spec,
+            state: InstanceState::Running,
+            virtual_ip: vip,
+            price_per_sec: offer.price_per_sec,
+            created_at: now_secs(),
+            billing_segment: 0,
+        };
+        self.ensure_billable(&offer.provider).await?;
+        self.meter.start(&instance.billing_id(), renter, &offer.provider, offer.price_per_sec, now_secs()).await?;
+        self.instances.lock().await.insert(instance.id.clone(), instance.clone());
+        Ok(instance)
+    }
+
+    async fn ensure_billable(&self, provider: &str) -> Result<()> {
+        self.ledger.open_account(provider, AccountKind::Provider).await
+    }
+
+    pub async fn instance(&self, renter: &str, id: &str) -> Result<Instance> {
+        self.instances
+            .lock()
+            .await
+            .get(id)
+            .filter(|i| i.renter == renter)
+            .cloned()
+            .ok_or_else(|| Error::NotFound(format!("instance {id}")))
+    }
+
+    pub async fn instances(&self, renter: &str) -> Vec<Instance> {
+        let mut v: Vec<Instance> =
+            self.instances.lock().await.values().filter(|i| i.renter == renter).cloned().collect();
+        v.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        v
+    }
+
+    /// Scale to zero (hibernate + stop billing) or back to one.
+    pub async fn scale(&self, renter: &str, id: &str, replicas: u32) -> Result<Instance> {
+        let inst = self.instance(renter, id).await?;
+        let provider = self
+            .offers
+            .read()
+            .await
+            .iter()
+            .find(|o| o.id == inst.offer_id)
+            .map(|o| o.provider.clone())
+            .unwrap_or_default();
+        let updated = match (inst.state, replicas) {
+            (InstanceState::Running, 0) => {
+                self.provisioner.hibernate(inst.vm).await?;
+                self.meter.stop(&inst.billing_id(), now_secs()).await?;
+                Instance { state: InstanceState::ScaledToZero, ..inst }
+            }
+            (InstanceState::ScaledToZero, 1) => {
+                self.provisioner.resume(inst.vm).await?;
+                let next =
+                    Instance { state: InstanceState::Running, billing_segment: inst.billing_segment + 1, ..inst };
+                self.meter.start(&next.billing_id(), renter, &provider, next.price_per_sec, now_secs()).await?;
+                next
+            }
+            (s, r) if (s == InstanceState::Running && r == 1) || (s == InstanceState::ScaledToZero && r == 0) => inst,
+            (InstanceState::Terminated, _) => return Err(Error::Invalid("instance is terminated".into())),
+            (_, r) => return Err(Error::Invalid(format!("replicas must be 0 or 1 (got {r})"))),
+        };
+        self.instances.lock().await.insert(updated.id.clone(), updated.clone());
+        Ok(updated)
+    }
+
+    pub async fn terminate(&self, renter: &str, id: &str) -> Result<Instance> {
+        let inst = self.instance(renter, id).await?;
+        if inst.state == InstanceState::Running {
+            self.meter.stop(&inst.billing_id(), now_secs()).await?;
+        }
+        if inst.state != InstanceState::Terminated {
+            self.provisioner.destroy(inst.vm).await?;
+        }
+        let done = Instance { state: InstanceState::Terminated, ..inst };
+        self.instances.lock().await.insert(done.id.clone(), done.clone());
+        Ok(done)
+    }
+
+    pub async fn account(&self, account: &str) -> Result<AccountSummary> {
+        Ok(AccountSummary {
+            account: account.to_owned(),
+            balance: self.ledger.balance(account).await?,
+            history: self.ledger.history(account, 50).await?,
+        })
+    }
+
+    /// Instances whose VM is currently running (for metrics).
+    pub async fn running_vms(&self) -> usize {
+        self.provisioner.list().await.iter().filter(|v| v.state == VmState::Running).count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn deploy_scale_terminate_lifecycle() {
+        let (node, key) = Node::demo().await.expect("demo");
+        let renter = node.authenticate(&key).await.expect("auth");
+        let spec = VmSpec {
+            vcpus: 2,
+            mem_mib: 4096,
+            disk_gib: 20,
+            image: "ubuntu-24.04".into(),
+            accelerator: None,
+            confidential: false,
+        };
+        let inst = node.deploy(&renter, DeployRequest { offer_id: "fra-cpu-1".into(), spec }).await.expect("deploy");
+        assert_eq!(inst.state, InstanceState::Running);
+        assert!(inst.virtual_ip.octets()[..2] == [10, 147]);
+
+        let z = node.scale(&renter, &inst.id, 0).await.expect("to zero");
+        assert_eq!(z.state, InstanceState::ScaledToZero);
+        let up = node.scale(&renter, &inst.id, 1).await.expect("back up");
+        assert_eq!(up.state, InstanceState::Running);
+        let gone = node.terminate(&renter, &inst.id).await.expect("terminate");
+        assert_eq!(gone.state, InstanceState::Terminated);
+        assert!(node.instance("someone-else", &inst.id).await.is_err());
+    }
+}
