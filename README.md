@@ -32,7 +32,7 @@ peer-vps/
 
 | Area | Working today | Stubbed behind a trait (next steps) |
 |---|---|---|
-| Virtualization | Resource allocator with core pinning, RAM/disk budgets, fractional GPU/NPU slice accounting; KVM backend opens `/dev/kvm`, creates the VM, registers guest RAM, creates vCPUs | Kernel boot + vCPU run loop, pause/snapshot on KVM (or a Firecracker backend), VFIO passthrough, SEV-SNP/TDX launch and real attestation |
+| Virtualization | Resource allocator with core pinning, RAM/disk budgets, fractional GPU/NPU slice accounting; **Firecracker backend boots real MicroVMs** (per-VM disk, pinned cores, optional bridged tap NIC, pause/resume, full snapshot + restore, serial console); raw KVM backend creates VM, RAM and vCPUs | Firecracker `jailer` hardening, reflink/overlay disks, GPU passthrough (needs a QEMU/cloud-hypervisor backend), SEV-SNP/TDX launch and real attestation |
 | Proof of compute | Nonce-bound sequential BLAKE3 hash-chain with spot-check verification and tier timing | Succinct ZK proof (zkVM receipt) behind the same `ComputeProver`/`ComputeVerifier` traits |
 | Network | Tunnel codec (zstd → ChaCha20-Poly1305, replay window), Noise IK handshake (`snow`), STUN client/responder, UDP hole punching with port spraying, overlay routing table, Linux TUN pump | TURN relay fallback, DHT RPCs on the wire, QUIC snapshot transport |
 | Failover | Authenticated heartbeats, 3-miss detection, route flip to standby, snapshot seal/open (zstd + chunked AEAD), SIGTERM/SIGINT hibernation, dirty-block replication, SLA slashing | logind shutdown inhibitor, replica restore path |
@@ -69,7 +69,20 @@ cargo run -p peervps-cli -- offers --min-vram-mib 10000 --max-price-per-hour 50
 cargo run -p peervps-cli -- deploy fra-cpu-1 --vcpus 2 --mem-mib 4096
 cargo run -p peervps-cli -- scale <instance-id> 0
 cargo run -p peervps-cli -- account
+cargo run -p peervps-cli -- console <instance-id>   # guest serial console (Firecracker backend)
 ```
+
+### Booting real MicroVMs (Linux with `/dev/kvm`)
+
+```bash
+scripts/fetch-firecracker-assets.sh .firecracker    # firecracker binary, guest kernel, Ubuntu 24.04 rootfs + SSH key
+sudo cargo run -p peervps-cli -- serve --hypervisor firecracker \
+  --fc-binary .firecracker/firecracker --fc-kernel .firecracker/vmlinux --fc-images .firecracker/images \
+  [--bridge br0]                                     # give guests a NIC on an existing bridge
+```
+
+Every VM gets `/var/lib/peervps/vms/<vm>/` with its API socket, root disk, snapshot files and `console.log`.
+Without `--bridge` guests boot with no network. Guests asking for a GPU/NPU are refused by this backend.
 
 ## Safety rules
 

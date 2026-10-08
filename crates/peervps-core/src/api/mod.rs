@@ -15,6 +15,7 @@
 //! | GET    | `/v1/instances/{id}`           | status                               |
 //! | POST   | `/v1/instances/{id}/scale`     | `{"replicas":0|1}`                   |
 //! | DELETE | `/v1/instances/{id}`           | terminate                            |
+//! | GET    | `/v1/instances/{id}/console`   | tail of the guest serial console     |
 //! | GET    | `/v1/account`                  | balance + ledger                     |
 //! | POST   | `/v1/webhooks/{gateway}`       | signed payment top-ups (no bearer)   |
 
@@ -56,6 +57,8 @@ impl IntoResponse for ApiError {
             Error::Invalid(_) | Error::Serde(_) => (StatusCode::BAD_REQUEST, "invalid_argument"),
             Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Error::Unsupported(_) => (StatusCode::NOT_IMPLEMENTED, "unsupported"),
+            // Operator-facing detail (boot failures, bad images) is what an agent needs to retry elsewhere.
+            Error::Hypervisor(_) => (StatusCode::SERVICE_UNAVAILABLE, "hypervisor_error"),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
         let message = if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -95,6 +98,7 @@ pub fn router(node: Node) -> Router {
         .route("/v1/instances", post(deploy).get(list_instances))
         .route("/v1/instances/{id}", get(get_instance).delete(terminate))
         .route("/v1/instances/{id}/scale", post(scale))
+        .route("/v1/instances/{id}/console", get(console))
         .route("/v1/account", get(account))
         .route("/v1/webhooks/{gateway}", post(webhook))
         .with_state(node)
@@ -162,6 +166,16 @@ async fn scale(
 
 async fn terminate(State(node): State<Node>, Caller(who): Caller, Path(id): Path<String>) -> ApiResult<Instance> {
     Ok(Json(node.terminate(&who, &id).await?))
+}
+
+#[derive(Debug, Serialize)]
+struct Console {
+    /// `null` when the hypervisor backend does not capture a serial console.
+    console: Option<String>,
+}
+
+async fn console(State(node): State<Node>, Caller(who): Caller, Path(id): Path<String>) -> ApiResult<Console> {
+    Ok(Json(Console { console: node.console(&who, &id, 64 * 1024).await? }))
 }
 
 async fn account(State(node): State<Node>, Caller(who): Caller) -> ApiResult<AccountSummary> {

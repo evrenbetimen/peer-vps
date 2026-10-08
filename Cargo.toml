@@ -44,6 +44,7 @@ hex = "0.4"
 hmac = "0.12"
 kvm-bindings = "0.14"
 kvm-ioctls = "0.25"
+nix = { version = "0.31", features = ["sched", "signal"] }
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
