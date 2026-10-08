@@ -28,6 +28,29 @@ peer-vps/
     └── src-tauri/                commands, event pump, metrics sampler, failover demo topology
 ```
 
+## The desktop app
+
+The UI lives in [`apps/desktop`](apps/desktop): `pnpm tauri dev` opens it as a native app, `pnpm dev`
+opens the same UI in a browser at http://localhost:1420 against mock data. Screens from the QA run:
+
+| Host (provider mode) | Console (renter + SSH) |
+|---|---|
+| ![Host dashboard](docs/screenshots/host.png) | ![Renter console](docs/screenshots/renter.png) |
+| **Wallet** | **Failover** |
+| ![Wallet](docs/screenshots/wallet.png) | ![Failover topology](docs/screenshots/failover.png) |
+
+## Platforms
+
+| | Linux | macOS (12+, Apple silicon and Intel) |
+|---|---|---|
+| Desktop app, CLI, renter side, wallet, overlay codec | ✓ | ✓ |
+| Host telemetry (CPU, RAM, network, temperature) | ✓ | ✓ (via `sysinfo`) |
+| Overlay TUN device | `/dev/net/tun` | `utun<N>` (needs root) |
+| Hosting real MicroVMs | Firecracker or KVM (`/dev/kvm`) | not yet: mock hypervisor; an Apple Virtualization.framework backend is the next step |
+
+CI builds and tests every commit on both, and attaches an unsigned `PeerVPS.dmg` to each run. Because it
+is unsigned, open it the first time with right-click → Open (or `xattr -dr com.apple.quarantine /Applications/PeerVPS.app`).
+
 ## What is real and what is a stub
 
 | Area | Working today | Stubbed behind a trait (next steps) |
@@ -45,7 +68,8 @@ peer-vps/
 * Rust 1.85+ (edition 2024)
 * Node 22 + pnpm 10
 * Linux desktop builds: `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev`
-  (see the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for macOS/Windows)
+* macOS: Xcode Command Line Tools (`xcode-select --install`); nothing else
+  (see the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for Windows)
 
 ## Build, lint, test
 
@@ -55,12 +79,17 @@ pnpm build                                   # typecheck + bundle the UI (the Ta
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+pnpm test                                    # UI unit tests (Vitest)
+pnpm test:e2e                                # UI end-to-end QA (Playwright)
 ```
+
+The full QA/QC plan, what each suite covers and the gates CI enforces are in [docs/QA.md](docs/QA.md).
 
 ## Run
 
 ```bash
 pnpm tauri dev                               # desktop app (Host / Console / Wallet / Failover)
+pnpm tauri build --bundles dmg               # macOS: PeerVPS.dmg in target/release/bundle/dmg
 pnpm dev                                     # UI only, in a browser, against mock data
 
 cargo run -p peervps-cli -- serve            # headless node on 127.0.0.1:7070 (prints a demo API key)

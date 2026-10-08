@@ -6,6 +6,9 @@
     "dev": "pnpm --filter @peervps/desktop dev",
     "build": "pnpm --filter @peervps/desktop build",
     "typecheck": "pnpm --filter @peervps/desktop typecheck",
-    "tauri": "pnpm --filter @peervps/desktop tauri"
+    "tauri": "pnpm --filter @peervps/desktop tauri",
+    "test": "pnpm --filter @peervps/desktop test",
+    "test:coverage": "pnpm --filter @peervps/desktop test:coverage",
+    "test:e2e": "pnpm --filter @peervps/desktop test:e2e"
   }
 }

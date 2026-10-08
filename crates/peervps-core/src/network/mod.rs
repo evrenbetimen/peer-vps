@@ -16,7 +16,7 @@ pub mod holepunch;
 pub mod noise;
 pub mod routing;
 pub mod stun;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod tun_device;
 
 pub use codec::{CodecConfig, TunnelCodec};

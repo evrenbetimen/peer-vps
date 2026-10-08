@@ -32,13 +32,16 @@ uuid.workspace = true
 zstd.workspace = true
 
 # Hardware-facing crates only exist on Linux hosts; every other platform
-# (and CI without /dev/kvm) runs the mock hypervisor and a userspace tunnel.
+# (and CI without /dev/kvm) runs the mock hypervisor.
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-bindings.workspace = true
 kvm-ioctls.workspace = true
 nix.workspace = true
-tun.workspace = true
 vm-memory.workspace = true
+
+# The overlay's TUN data path works on Linux (/dev/net/tun) and macOS (utun).
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+tun.workspace = true
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
