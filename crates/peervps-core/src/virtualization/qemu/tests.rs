@@ -107,8 +107,8 @@ fn windows_installs_get_in_box_devices_a_screen_and_answers() {
         "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
         "if=pflash,format=raw,unit=1,file=/srv/pv/run/vm/efivars.fd",
     ] {
-        let want = want.replace('/', std::path::MAIN_SEPARATOR_STR);
-        assert!(cmd.contains(&want), "missing {want}: {cmd}");
+        // Joined paths mix separators on Windows (`/srv/pv\\images/win11.iso`).
+        assert!(cmd.replace('\\', "/").contains(want), "missing {want}: {cmd}");
     }
     assert!(!cmd.contains("if=virtio,file") && !cmd.contains("-smbios"));
 

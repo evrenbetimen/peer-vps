@@ -820,13 +820,13 @@ impl Peers {
 
     /// Close the local ports carrying an instance (it was terminated).
     pub(crate) async fn stop_forwards(&self, id: &str) {
-        self.inner.forwards.lock().await.retain(|(inst, _), (_, task)| {
-            let keep = inst != id;
-            if !keep {
-                task.abort();
-            }
-            keep
-        });
+        let stopped: Vec<_> =
+            self.inner.forwards.lock().await.extract_if(|(inst, _), _| inst == id).map(|(_, (_, task))| task).collect();
+        for task in stopped {
+            // Aborting only asks; wait until the listener is dropped so the port is closed on return.
+            task.abort();
+            let _ = task.await;
+        }
     }
 
     // ---- hosting for a peer ----
