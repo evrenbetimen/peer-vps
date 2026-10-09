@@ -160,3 +160,10 @@ test("peers: a machine on the network is one click away and the router port can 
   await page.getByRole("switch", { name: /Reachable from other networks/ }).click();
   await expect(page.getByText("pv-5c0ffee15ea1ab1e@203.0.113.7:7071")).toBeVisible();
 });
+
+test("peers: a machine behind CGNAT stays reachable through a relay", async ({ page }) => {
+  await page.getByRole("textbox", { name: "Relay address" }).fill("relay.example.com:7073");
+  await page.getByRole("button", { name: "Use relay" }).click();
+  await expect(page.getByText("pv-5c0ffee15ea1ab1e@relay://relay.example.com:7073")).toBeVisible();
+  await shot(page, "relay");
+});

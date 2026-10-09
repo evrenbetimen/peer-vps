@@ -10,6 +10,7 @@ import type {
   Instance,
   InternetStatus,
   NearbyPeer,
+  RelayStatus,
   NodeEvent,
   Offer,
   OfferQuery,
@@ -34,6 +35,7 @@ const peers: PeerInfo[] = [
   { id: "pv-a17b0c55e9d24f13", publicKey: "a17b0c55e9d24f13".padEnd(64, "0"), address: "192.168.1.31:7071", trusted: false, status: "pending", offers: [], lastSeen: Math.floor(Date.now() / 1000), error: null },
 ];
 let internet: InternetStatus = { state: "off", address: null, detail: null };
+let relay: RelayStatus = { state: "off", address: null, detail: null };
 const nearby: NearbyPeer[] = [{ id: "pv-b2e4f6a8c0d1e3f5", invite: "pv-b2e4f6a8c0d1e3f5@192.168.1.44:7071", lastSeen: Math.floor(Date.now() / 1000) }];
 /** Peers' offers as the node lists them: `<peer>/<offer>`, provided by the peer. */
 function peerOffers(): Offer[] {
@@ -214,9 +216,24 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
           invite: `${ME}@192.168.1.10:7071`,
           internetInvite: internet.address ? `${ME}@${internet.address}` : null,
           internet,
+          relayInvite: relay.state === "connected" && relay.address ? `${ME}@relay://${relay.address}` : null,
+          relay,
           nearby: nearby.filter((n) => !peers.some((p) => p.id === n.id)),
           peers,
         } satisfies PeerOverview;
+      case "set_relay": {
+        const address = typeof args.address === "string" && args.address.trim() ? args.address.trim() : null;
+        if (!address) {
+          relay = { state: "off", address: null, detail: null };
+        } else {
+          const full = /:\d+$/.test(address) ? address : `${address}:7073`;
+          relay = { state: "connecting", address: full, detail: null };
+          setTimeout(() => {
+            if (relay.address === full) relay = { ...relay, state: full.startsWith("down.") ? "retrying" : "connected", detail: full.startsWith("down.") ? `relay: cannot reach ${full}` : null };
+          }, 300);
+        }
+        return relay;
+      }
       case "set_internet":
         if (!args.enabled) {
           internet = { state: "off", address: null, detail: null };

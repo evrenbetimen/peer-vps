@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Batch, InternetStatus, Instance, Offer, PeerInfo, PeerOverview, Topology } from "./types";
+import type { Batch, InternetStatus, RelayStatus, Instance, Offer, PeerInfo, PeerOverview, Topology } from "./types";
 
 // The mock keeps module-level state, so every test gets a fresh copy.
 async function freshMock() {
@@ -180,5 +180,19 @@ describe("browser mock bridge", () => {
     expect(on.internetInvite).toBe(`${on.id}@203.0.113.7:7071`);
     expect((await call<InternetStatus>(m, "set_internet", { enabled: false })).state).toBe("off");
     expect((await call<PeerOverview>(m, "get_peers")).internetInvite).toBeNull();
+  });
+
+  it("registers at a relay, reports a relay it cannot reach, and stops", async () => {
+    const m = await freshMock();
+    expect((await call<RelayStatus>(m, "set_relay", { address: "relay.example.com" })).address).toBe("relay.example.com:7073");
+    await vi.advanceTimersByTimeAsync(400);
+    const on = await call<PeerOverview>(m, "get_peers");
+    expect(on.relay.state).toBe("connected");
+    expect(on.relayInvite).toBe(`${on.id}@relay://relay.example.com:7073`);
+    await call(m, "set_relay", { address: "down.example.com:9" });
+    await vi.advanceTimersByTimeAsync(400);
+    const down = await call<PeerOverview>(m, "get_peers");
+    expect([down.relay.state, down.relayInvite]).toEqual(["retrying", null]);
+    expect((await call<RelayStatus>(m, "set_relay", { address: null })).state).toBe("off");
   });
 });

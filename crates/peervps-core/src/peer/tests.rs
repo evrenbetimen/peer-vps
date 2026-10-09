@@ -268,3 +268,58 @@ async fn finds_machines_on_the_lan_and_opens_the_router_port() {
     assert_eq!(a.set_internet(false).await.expect("off").state, InternetState::Off);
     assert_eq!(a.overview().await.internet_invite, None);
 }
+
+#[tokio::test]
+async fn two_machines_that_accept_no_connections_rent_through_a_relay() {
+    let (relay_addr, relay_task) =
+        relay::serve("127.0.0.1:0".parse().expect("addr"), Identity::generate().expect("relay")).await.expect("relay");
+    let relay_addr = relay_addr.to_string();
+    let unreachable = |hv: Arc<dyn Hypervisor>| async move {
+        let (node, key) = Node::demo_with_hypervisor(Store::in_memory().expect("store"), hv).await.expect("node");
+        let renter = node.authenticate(&key).await.expect("renter");
+        // No listen(): like a machine behind CGNAT, it takes no connections of its own.
+        let peers = Peers::attach(&node, Identity::generate().expect("key"), None).expect("attach");
+        (node, renter, peers)
+    };
+    let echo = echo_server().await;
+    let (host, _, host_peers) =
+        unreachable(Arc::new(EchoGuests { inner: MockHypervisor::default(), port: echo })).await;
+    host.publish_offer(host_offer(&host)).await;
+    let (renter_node, renter, peers) = unreachable(Arc::new(MockHypervisor::default())).await;
+    for p in [&host_peers, &peers] {
+        p.set_relay(Some(&relay_addr)).await.expect("use relay");
+    }
+    let mut invite = None;
+    for _ in 0..100 {
+        invite = host_peers.overview().await.relay_invite;
+        if invite.is_some() && peers.relay().state == RelayState::Connected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let invite = invite.expect("registered at the relay");
+    assert_eq!(invite, format!("{}@relay://{relay_addr}", host_peers.id()));
+    assert!(matches!(peers.add(&format!("relay://{relay_addr}")).await, Err(Error::Invalid(_))), "needs the id");
+
+    let added = peers.add(&invite).await.expect("add through the relay");
+    assert_eq!(added.status, PeerStatus::WaitingForApproval, "{added:?}");
+    let pending = host_peers.get(peers.id()).await.expect("host saw us");
+    assert_eq!(pending.address, Some(format!("relay://{relay_addr}")), "dial back through the relay");
+    assert_eq!(host_peers.approve(peers.id()).await.expect("approve").status, PeerStatus::Online);
+    peers.refresh().await;
+    assert_eq!(peers.get(host_peers.id()).await.expect("peer").status, PeerStatus::Online);
+
+    let offer = format!("{}/this-machine", host_peers.id());
+    let inst = renter_node.deploy(&renter, DeployRequest { offer_id: offer, spec: spec() }).await.expect("deploy");
+    let access = renter_node.access(&renter, &inst.id).await.expect("access").expect("endpoint");
+    let mut s = TcpStream::connect(("127.0.0.1", access.ssh_port)).await.expect("connect");
+    s.write_all(b"SSH-2.0-relayed\r\n").await.expect("write");
+    let mut buf = [0u8; 17];
+    s.read_exact(&mut buf).await.expect("read");
+    assert_eq!(&buf, b"SSH-2.0-relayed\r\n");
+    assert_eq!(renter_node.terminate(&renter, &inst.id).await.expect("terminate").state, InstanceState::Terminated);
+
+    assert_eq!(peers.set_relay(None).await.expect("off").state, RelayState::Off);
+    assert_eq!(peers.overview().await.relay_invite, None);
+    relay_task.abort();
+}

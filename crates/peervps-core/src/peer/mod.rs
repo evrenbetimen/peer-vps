@@ -25,6 +25,7 @@ pub mod channel;
 pub mod discovery;
 pub mod nat;
 pub mod proto;
+pub mod relay;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -49,6 +50,7 @@ use channel::Channel;
 use discovery::{Nearby, NearbyPeer};
 use nat::{InternetState, InternetStatus, NatConfig};
 use proto::{GuestPort, Request, Response};
+use relay::{RelayState, RelayStatus};
 
 /// Port `peervps serve --peer-listen` and the desktop app use unless told otherwise.
 pub const DEFAULT_PORT: u16 = 7071;
@@ -161,6 +163,9 @@ pub struct PeerOverview {
     /// The same for other networks, when the router forwards a port to us.
     pub internet_invite: Option<String>,
     pub internet: InternetStatus,
+    /// The same through a relay, for when neither side can accept connections.
+    pub relay_invite: Option<String>,
+    pub relay: RelayStatus,
     /// Machines announcing themselves on this network that are not peers yet.
     pub nearby: Vec<NearbyPeer>,
     pub peers: Vec<PeerInfo>,
@@ -198,6 +203,8 @@ struct Inner {
     /// Keeps the router's port forward alive; aborting it stops renewing.
     internet_task: Mutex<Option<JoinHandle<()>>>,
     discovery_task: Mutex<Option<JoinHandle<()>>>,
+    relay: std::sync::Mutex<RelayStatus>,
+    relay_task: Mutex<Vec<JoinHandle<()>>>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -205,6 +212,9 @@ struct Settings {
     /// Ask the router to forward a port so other networks can connect.
     #[serde(default)]
     internet: bool,
+    /// Stay reachable through this relay (`host:port`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relay: Option<String>,
 }
 
 fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -252,6 +262,8 @@ impl Peers {
                 internet: std::sync::Mutex::new(InternetStatus::off()),
                 internet_task: Mutex::new(None),
                 discovery_task: Mutex::new(None),
+                relay: std::sync::Mutex::new(RelayStatus::off()),
+                relay_task: Mutex::new(Vec::new()),
             }),
         };
         node.attach_peers(me.clone())?;
@@ -301,6 +313,68 @@ impl Peers {
         Ok(())
     }
 
+    async fn save_settings(&self, change: impl FnOnce(&mut Settings)) -> Result<()> {
+        let Some(path) = self.settings_file() else { return Ok(()) };
+        let mut settings = self.settings();
+        change(&mut settings);
+        tokio::fs::write(&path, serde_json::to_vec_pretty(&settings)?).await?;
+        Ok(())
+    }
+
+    pub fn relay(&self) -> RelayStatus {
+        lock(&self.inner.relay).clone()
+    }
+
+    /// Stay reachable through a relay (`host[:port]`), or stop with `None`.
+    /// Returns at once; [`Self::relay`] follows the registration.
+    pub async fn set_relay(&self, relay: Option<&str>) -> Result<RelayStatus> {
+        let relay = relay.map(str::trim).filter(|r| !r.is_empty()).map(|r| {
+            let r = relay::relay_of(r).unwrap_or(r);
+            if r.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok()) {
+                r.to_owned()
+            } else {
+                format!("{r}:{}", relay::DEFAULT_PORT)
+            }
+        });
+        self.save_settings(|s| s.relay = relay.clone()).await?;
+        let mut tasks = self.inner.relay_task.lock().await;
+        for t in tasks.drain(..) {
+            t.abort();
+        }
+        let Some(address) = relay else {
+            *lock(&self.inner.relay) = RelayStatus::off();
+            return Ok(self.relay());
+        };
+        *lock(&self.inner.relay) =
+            RelayStatus { state: RelayState::Connecting, address: Some(address.clone()), detail: None };
+        let (calls_tx, mut calls) = tokio::sync::mpsc::channel::<TcpStream>(16);
+        let me = self.clone();
+        tasks.push(tokio::spawn(async move {
+            while let Some(stream) = calls.recv().await {
+                let me = me.clone();
+                tokio::spawn(async move {
+                    let from = stream.peer_addr().unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
+                    if let Err(e) = me.serve(stream, from).await {
+                        tracing::debug!(%from, error = %e, "relayed peer connection ended");
+                    }
+                });
+            }
+        }));
+        let inner = self.inner.clone();
+        tasks.push(tokio::spawn(relay::stay_registered(
+            address,
+            self.inner.identity.keypair.clone(),
+            move |s| *lock(&inner.relay) = s,
+            calls_tx,
+        )));
+        Ok(self.relay())
+    }
+
+    fn hello(&self) -> Request {
+        let relay = self.relay().address;
+        Request::Hello { listen_port: self.listen_addr().map(|a| a.port()), relay }
+    }
+
     pub fn internet(&self) -> InternetStatus {
         lock(&self.inner.internet).clone()
     }
@@ -308,9 +382,7 @@ impl Peers {
     /// Ask the router to forward a port to us (or stop), and remember the choice.
     /// Returns at once with `checking`; [`Self::internet`] has the outcome.
     pub async fn set_internet(&self, enabled: bool) -> Result<InternetStatus> {
-        if let Some(path) = self.settings_file() {
-            tokio::fs::write(&path, serde_json::to_vec_pretty(&Settings { internet: enabled })?).await?;
-        }
+        self.save_settings(|s| s.internet = enabled).await?;
         let mut task = self.inner.internet_task.lock().await;
         if let Some(old) = task.take() {
             old.abort();
@@ -378,8 +450,14 @@ impl Peers {
                 }
             }
         });
-        if self.settings().internet {
+        let settings = self.settings();
+        if settings.internet {
             self.set_internet(true).await?;
+        }
+        if let Some(relay) = settings.relay.as_deref()
+            && self.relay().state == RelayState::Off
+        {
+            self.set_relay(Some(relay)).await?;
         }
         Ok(bound)
     }
@@ -402,6 +480,12 @@ impl Peers {
         nearby.retain(|n| !peers.iter().any(|p| p.id == n.id));
         let internet = self.internet();
         let internet_invite = internet.address.as_ref().map(|a| format!("{}@{a}", self.id()));
+        let relay = self.relay();
+        let relay_invite = relay
+            .address
+            .as_ref()
+            .filter(|_| relay.state == RelayState::Connected)
+            .map(|a| format!("{}@relay://{a}", self.id()));
         let listen = self.listen_addr();
         PeerOverview {
             id: self.id().to_owned(),
@@ -412,6 +496,8 @@ impl Peers {
             }),
             internet_invite,
             internet,
+            relay_invite,
+            relay,
             nearby,
             peers,
         }
@@ -432,12 +518,21 @@ impl Peers {
         if address.is_empty() {
             return Err(Error::Invalid("give the peer's address, e.g. 192.168.1.20:7071".into()));
         }
-        let address = if address.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok()) {
-            address.to_owned()
-        } else {
-            format!("{address}:{DEFAULT_PORT}")
+        let (relay, host) = match relay::relay_of(address) {
+            Some(r) => (true, r),
+            None => (false, address),
         };
-        let mut ch = self.dial(&address).await?;
+        let port = if relay { relay::DEFAULT_PORT } else { DEFAULT_PORT };
+        let host = if host.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok()) {
+            host.to_owned()
+        } else {
+            format!("{host}:{port}")
+        };
+        let address = if relay { format!("relay://{host}") } else { host };
+        if relay && expect.is_none() {
+            return Err(Error::Invalid("a relay address needs the peer id too: pv-…@relay://host:port".into()));
+        }
+        let mut ch = self.dial(&address, expect).await?;
         let id = Identity::id_for(&ch.remote);
         if id == self.id() {
             return Err(Error::Invalid("that address is this node".into()));
@@ -468,8 +563,7 @@ impl Peers {
             entry.address = Some(address.clone());
             entry.trusted = true;
         }
-        let answer =
-            self.exchange(&mut ch, &Request::Hello { listen_port: self.listen_addr().map(|a| a.port()) }).await;
+        let answer = self.exchange(&mut ch, &self.hello()).await;
         self.note_hello(&id, answer).await;
         self.save().await?;
         self.get(&id).await
@@ -516,8 +610,7 @@ impl Peers {
     }
 
     async fn refresh_one(&self, id: &str) {
-        let hello = Request::Hello { listen_port: self.listen_addr().map(|a| a.port()) };
-        let answer = self.call(id, &hello).await;
+        let answer = self.call(id, &self.hello()).await;
         self.note_hello(id, answer).await;
     }
 
@@ -596,12 +689,19 @@ impl Peers {
 
     // ---- renting from a peer ----
 
-    async fn dial(&self, address: &str) -> Result<Channel> {
+    /// Connect to `address` (`host:port`, or `relay://host:port` for the peer `id`).
+    async fn dial(&self, address: &str, id: Option<&str>) -> Result<Channel> {
         let unreachable = |e: String| Error::Peer(format!("cannot reach {address}: {e}"));
-        let stream = tokio::time::timeout(DIAL_TIMEOUT, TcpStream::connect(address))
-            .await
-            .map_err(|_| unreachable("timed out".into()))?
-            .map_err(|e| unreachable(e.to_string()))?;
+        let stream = match relay::relay_of(address) {
+            Some(r) => {
+                let id = id.ok_or_else(|| Error::Invalid("a relay address needs the peer id".into()))?;
+                relay::connect(r, id, &self.inner.identity.keypair).await.map_err(|e| unreachable(e.to_string()))?
+            }
+            None => tokio::time::timeout(DIAL_TIMEOUT, TcpStream::connect(address))
+                .await
+                .map_err(|_| unreachable("timed out".into()))?
+                .map_err(|e| unreachable(e.to_string()))?,
+        };
         tokio::time::timeout(DIAL_TIMEOUT, Channel::connect(stream, &self.inner.identity.keypair))
             .await
             .map_err(|_| unreachable("handshake timed out".into()))?
@@ -619,7 +719,7 @@ impl Peers {
             let address = p.address.clone().ok_or_else(|| Error::Peer(format!("no address to reach {id}")))?;
             (address, p.public_key.clone())
         };
-        let ch = self.dial(&address).await?;
+        let ch = self.dial(&address, Some(id)).await?;
         if hex::encode(&ch.remote) != key {
             return Err(Error::Peer(format!("{address} no longer has {id}'s key")));
         }
@@ -760,7 +860,9 @@ impl Peers {
     async fn admit(&self, peer: &str, key: &[u8], ip: IpAddr, req: &Request) -> Result<()> {
         let key = hex::encode(key);
         let dial_back = match req {
-            Request::Hello { listen_port: Some(port) } => Some(SocketAddr::new(ip, *port).to_string()),
+            // A peer that uses a relay is there because it cannot accept connections itself.
+            Request::Hello { relay: Some(r), .. } => Some(format!("relay://{r}")),
+            Request::Hello { listen_port: Some(port), .. } => Some(SocketAddr::new(ip, *port).to_string()),
             _ => None,
         };
         let mut changed = false;

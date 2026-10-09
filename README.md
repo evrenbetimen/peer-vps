@@ -141,13 +141,19 @@ plainly when this cannot work:
 - the router does not answer UPnP: turn UPnP on in the router, or forward TCP 7071 to this machine by hand;
 - the router's own internet address is private or `100.64.x.x`, or differs from what STUN sees: the provider
   (or a second modem) shares one address between customers (CGNAT), and nothing on your side can open a port.
-  The other machine can still add you if it is reachable, since either side can host. A relay for two
-  machines that are both behind CGNAT is not built yet.
+  The other machine can still add you if it is reachable, since either side can host, or use a relay.
+
+**Relay (both machines behind CGNAT).** Run `peervps relay` on any machine others can reach: a small VPS,
+or a friend's machine with an open port (it listens on TCP 7073). Each CGNAT machine enters it under
+**Peers → Use relay** (`peervps peer relay host:7073`, or `serve --relay host:7073`), keeps one connection
+open to it, and gets a third invite, `pv-…@relay://host:7073`, that works from anywhere. The relay only
+joins the two connections: the machines run their own end-to-end Noise handshake through it, so it sees
+ciphertext and cannot pose as either of them (it does see who connects to whom, and how much).
 
 The image must be installed on the host (pull or import it there). Money does not cross machines yet: the
 host gives each new peer a one-time 50-credit welcome balance and bills it per second in its own ledger.
 The REST API mirrors all of it: `GET/POST /v1/peers`, `POST /v1/peers/{id}/approve`,
-`DELETE /v1/peers/{id}`, `PUT /v1/peers/internet`.
+`DELETE /v1/peers/{id}`, `PUT /v1/peers/internet`, `PUT /v1/peers/relay`.
 
 ## What is real and what is a stub
 
@@ -155,7 +161,7 @@ The REST API mirrors all of it: `GET/POST /v1/peers`, `POST /v1/peers/{id}/appro
 |---|---|---|
 | Virtualization | Resource allocator with core pinning, RAM/disk budgets, fractional GPU/NPU slice accounting; **QEMU backend runs real VMs on Linux, macOS and Windows** (cloud images, copy-on-write disks, cloud-init login, SSH port forward, pause/resume, snapshot + restore, serial console); **Firecracker backend boots real MicroVMs** (per-VM disk, pinned cores, optional bridged tap NIC, pause/resume, full snapshot + restore, serial console); raw KVM backend creates VM, RAM and vCPUs | Firecracker `jailer` hardening, reflink/overlay disks, GPU passthrough (needs a QEMU/cloud-hypervisor backend), SEV-SNP/TDX launch and real attestation |
 | Proof of compute | Nonce-bound sequential BLAKE3 hash-chain with spot-check verification and tier timing | Succinct ZK proof (zkVM receipt) behind the same `ComputeProver`/`ComputeVerifier` traits |
-| Network | Tunnel codec (zstd → ChaCha20-Poly1305, replay window), Noise IK handshake (`snow`), STUN client/responder, UDP hole punching with port spraying, overlay routing table, Linux TUN pump; **node-to-node renting over Noise XX TCP** (pinned keys, approval, remote deploy and port carrying), LAN discovery beacons, UPnP IGD port forwarding with STUN and CGNAT detection | TURN relay fallback, DHT RPCs on the wire, QUIC snapshot transport, a relay for peers that are both behind CGNAT, cross-node settlement |
+| Network | Tunnel codec (zstd → ChaCha20-Poly1305, replay window), Noise IK handshake (`snow`), STUN client/responder, UDP hole punching with port spraying, overlay routing table, Linux TUN pump; **node-to-node renting over Noise XX TCP** (pinned keys, approval, remote deploy and port carrying), LAN discovery beacons, UPnP IGD port forwarding with STUN and CGNAT detection, a relay that splices peers behind CGNAT (end-to-end encrypted) | TURN relay fallback, DHT RPCs on the wire, QUIC snapshot transport, hosted relays and relay discovery, cross-node settlement |
 | Failover | Authenticated heartbeats, 3-miss detection, route flip to standby, snapshot seal/open (zstd + chunked AEAD), SIGTERM/SIGINT hibernation, dirty-block replication, SLA slashing | logind shutdown inhibitor, replica restore path |
 | Billing | Integer µcredit ledger with journal, per-second settlement (drift-free), platform fee, suspension on empty balance, collateral lock/unlock/slash, pooled staking with pro-rata slashing, HMAC-SHA256 webhooks with replay window and idempotency | Real payment provider integration (an `HttpGateway` skeleton exists) |
 | API | REST `/v1` (offers, deploy, scale to zero, terminate, account, webhooks), CLI | tonic server for the `.proto` contract, event streaming |

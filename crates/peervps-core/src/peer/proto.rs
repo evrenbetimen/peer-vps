@@ -21,10 +21,13 @@ pub enum GuestPort {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Request {
-    /// Introduce ourselves; `listen_port` lets the host dial back once it
-    /// approves us, so renting works in both directions.
+    /// Introduce ourselves; `listen_port` (or `relay`, the relay we can be
+    /// reached through) lets the host dial back once it approves us, so
+    /// renting works in both directions.
     Hello {
         listen_port: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relay: Option<String>,
     },
     Deploy {
         offer_id: String,
@@ -118,7 +121,7 @@ mod tests {
     fn wire_format_is_tagged_camel_case() {
         let r = Request::Forward { id: "inst-1".into(), port: GuestPort::Rdp };
         assert_eq!(serde_json::to_string(&r).expect("json"), r#"{"op":"forward","id":"inst-1","port":"rdp"}"#);
-        let r = Request::Hello { listen_port: Some(7071) };
+        let r = Request::Hello { listen_port: Some(7071), relay: None };
         assert_eq!(serde_json::to_string(&r).expect("json"), r#"{"op":"hello","listenPort":7071}"#);
         let e = Response::from_error(&Error::NotFound("instance x".into()));
         assert!(matches!(e.clone().into_result("pv-1"), Err(Error::NotFound(m)) if m == "pv-1: instance x"));

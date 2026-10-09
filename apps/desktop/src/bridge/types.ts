@@ -256,6 +256,15 @@ export interface InternetStatus {
   detail: string | null;
 }
 
+export type RelayState = "off" | "connecting" | "connected" | "retrying";
+
+export interface RelayStatus {
+  state: RelayState;
+  /** `host:port` of the relay. */
+  address: string | null;
+  detail: string | null;
+}
+
 export interface NearbyPeer {
   id: string;
   /** `pv-…@ip:port`, ready to add. */
@@ -272,6 +281,9 @@ export interface PeerOverview {
   /** The same for other networks, when the router forwards a port. */
   internetInvite: string | null;
   internet: InternetStatus;
+  /** The same through a relay (`pv-…@relay://host:port`), when registered there. */
+  relayInvite: string | null;
+  relay: RelayStatus;
   /** PeerVPS machines announcing themselves on this network that are not peers yet. */
   nearby: NearbyPeer[];
   peers: PeerInfo[];
