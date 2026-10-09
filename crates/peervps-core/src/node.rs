@@ -415,6 +415,18 @@ impl Node {
         self.provisioner.hypervisor().console_tail(inst.vm, max_bytes).await
     }
 
+    /// Type into the instance's serial console (a guest on this machine only).
+    pub async fn console_input(&self, renter: &str, id: &str, data: &str) -> Result<()> {
+        let inst = self.instance(renter, id).await?;
+        if inst.state != InstanceState::Running {
+            return Err(Error::Invalid(format!("instance {id} is not running")));
+        }
+        if self.remote(&inst)?.is_some() {
+            return Err(Error::Unsupported("typing into a guest on another machine is not supported yet".into()));
+        }
+        self.provisioner.hypervisor().console_write(inst.vm, data.as_bytes()).await
+    }
+
     /// How to log in to the instance (`None` when the backend gives guests no SSH endpoint).
     pub async fn access(&self, renter: &str, id: &str) -> Result<Option<GuestAccess>> {
         let inst = self.instance(renter, id).await?;

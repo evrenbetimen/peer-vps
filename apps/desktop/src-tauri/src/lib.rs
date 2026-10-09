@@ -137,6 +137,7 @@ pub fn run() {
             commands::restore_peer,
             commands::get_instance_access,
             commands::get_console,
+            commands::send_console,
             commands::open_guest_screen,
             commands::get_peers,
             commands::add_peer,

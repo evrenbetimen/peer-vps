@@ -75,7 +75,7 @@ reachable with `ssh -p <port> peervps@127.0.0.1`. No root, bridge or tap device 
    feature turned on in *Turn Windows features on or off*).
 2. **Desktop app:** PeerVPS finds QEMU by itself. Download an image under Host → Guest images, then
    deploy from Console against "this-machine". The instance shows its SSH command and password, and the
-   terminal shows the guest's live serial console.
+   terminal is the guest's live serial console: click it and log in with that user and password.
 3. **Headless / agents:**
 
 ```bash
@@ -165,7 +165,7 @@ The REST API mirrors all of it: `GET/POST /v1/peers`, `POST /v1/peers/{id}/appro
 | Failover | Authenticated heartbeats, 3-miss detection, route flip to standby, snapshot seal/open (zstd + chunked AEAD), SIGTERM/SIGINT hibernation, dirty-block replication, SLA slashing | logind shutdown inhibitor, replica restore path |
 | Billing | Integer µcredit ledger with journal, per-second settlement (drift-free), platform fee, suspension on empty balance, collateral lock/unlock/slash, pooled staking with pro-rata slashing, HMAC-SHA256 webhooks with replay window and idempotency | Real payment provider integration (an `HttpGateway` skeleton exists) |
 | API | REST `/v1` (offers, deploy, scale to zero, terminate, account, webhooks), CLI | tonic server for the `.proto` contract, event streaming |
-| Desktop | All four views wired to the node through `invoke` and a frame-throttled event stream; the failover view drives the real `FailoverController` | SSH over the overlay (the terminal is a local echo shell for now) |
+| Desktop | All four views wired to the node through `invoke` and a frame-throttled event stream; the failover view drives the real `FailoverController` | SSH over the overlay (the terminal is the guest's serial console on this machine, read-only for guests on a peer, and a local echo shell in the browser preview) |
 
 ## Prerequisites
 
@@ -204,7 +204,8 @@ cargo run -p peervps-cli -- offers --min-vram-mib 10000 --max-price-per-hour 50
 cargo run -p peervps-cli -- deploy fra-cpu-1 --vcpus 2 --mem-mib 4096
 cargo run -p peervps-cli -- scale <instance-id> 0
 cargo run -p peervps-cli -- account
-cargo run -p peervps-cli -- console <instance-id>   # guest serial console (Firecracker backend)
+cargo run -p peervps-cli -- console <instance-id>   # guest serial console
+cargo run -p peervps-cli -- console <instance-id> --send 'uname -a'   # type a line into it (QEMU backend)
 ```
 
 ### Booting real MicroVMs (Linux with `/dev/kvm`)

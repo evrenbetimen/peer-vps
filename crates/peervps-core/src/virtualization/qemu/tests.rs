@@ -38,8 +38,13 @@ fn joined(args: &[OsString]) -> String {
 fn command_line_wires_disk_network_console_and_seed() {
     let root = PathBuf::from("/srv/pv,x");
     let dir = root.join("run/vm");
-    let extra = Extra { seed_url: Some("http://10.0.2.2:4000/".into()), incoming: false };
+    let extra = Extra { seed_url: Some("http://10.0.2.2:4000/".into()), incoming: false, serial_port: Some(5555) };
     let cmd = joined(&command_line(&cfg(&root), &dir, &launch(), 4444, &extra));
+    assert!(
+        cmd.contains("-chardev socket,id=ser0,host=127.0.0.1,port=5555,server=on,wait=off,logfile=")
+            && cmd.contains("console.log,logappend=on -serial chardev:ser0"),
+        "serial console takes input: {cmd}"
+    );
     assert!(cmd.contains("-machine q35 -accel tcg,thread=multi -cpu max -smp 2 -m 1024M"), "{cmd}");
     let disk = format!("file={},format=qcow2", dir.join("disk.qcow2").display().to_string().replace(',', ",,"));
     assert!(cmd.contains(&disk), "commas escaped: {cmd}");
@@ -55,7 +60,8 @@ fn command_line_wires_disk_network_console_and_seed() {
     arm.accel = Accel::Hvf;
     let fw = PathBuf::from("/opt/homebrew/share/qemu/edk2-aarch64-code.fd");
     arm.firmware = Some(fw.clone());
-    let cmd = joined(&command_line(&arm, &dir, &launch(), 1, &Extra { seed_url: None, incoming: true }));
+    let cmd =
+        joined(&command_line(&arm, &dir, &launch(), 1, &Extra { seed_url: None, incoming: true, serial_port: None }));
     assert!(cmd.contains("-machine virt -accel hvf -cpu host"), "{cmd}");
     assert!(cmd.contains(&format!("-bios {}", fw.display())));
     assert!(cmd.ends_with("-incoming defer"));
@@ -88,7 +94,7 @@ fn windows_launch(root: &Path) -> Launch {
 fn windows_installs_get_in_box_devices_a_screen_and_answers() {
     let root = PathBuf::from("/srv/pv");
     let dir = root.join("run/vm");
-    let none = Extra { seed_url: None, incoming: false };
+    let none = Extra { seed_url: None, incoming: false, serial_port: None };
     let mut x86 = cfg(&root);
     x86.uefi =
         Some(Uefi { code: "/usr/share/OVMF/OVMF_CODE_4M.fd".into(), vars: "/usr/share/OVMF/OVMF_VARS_4M.fd".into() });
@@ -209,6 +215,8 @@ async fn lifecycle_against_real_qemu() {
     assert_eq!(disk["virtual-size"], 1u64 << 30, "overlay grown to the rented size");
     assert!(disk["backing-filename"].as_str().is_some_and(|b| b.ends_with("blank.qcow2")));
 
+    hv.console_write(id, b"peervps\r").await.expect("type into the serial console");
+
     hv.pause(id).await.expect("pause");
     let snap = hv.snapshot(id).await.expect("snapshot");
     assert!(snap.bytes.len() > 64 * 1024, "snapshot carries guest state");
@@ -219,6 +227,7 @@ async fn lifecycle_against_real_qemu() {
     hv.resume(id).await.expect("resume restored");
     assert_eq!(status(hv.qmp(id, "query-status", None).await.expect("status")), "running");
     assert!(hv.console_tail(id, 1024).await.expect("console").is_some());
+    hv.console_write(id, b"\r").await.expect("type after a restore");
 
     hv.destroy(id).await.expect("destroy");
     assert!(!hv.vm_dir(id).exists());

@@ -45,6 +45,15 @@ test("renter deploys, opens a shell, scales to zero and terminates", async ({ pa
   await expect(page.getByText(/^SSH · 10\.147\.0\.\d+$/)).toBeVisible();
   const term = page.locator(".xterm");
   await expect(term).toContainText("Overlay SSH transport not connected yet");
+  // Every terminal row sits inside its box; the last one used to be cut off.
+  const overflow = await term.evaluate((el) => {
+    const box = el.closest(".bg-slate-950");
+    const screen = el.querySelector(".xterm-screen");
+    if (!box || !screen) return Infinity;
+    const r = box.getBoundingClientRect();
+    return screen.getBoundingClientRect().bottom - (r.top + box.clientTop + box.clientHeight);
+  });
+  expect(overflow).toBeLessThanOrEqual(0.5);
   await term.click();
   await page.keyboard.type("whoami");
   await page.keyboard.press("Enter");

@@ -233,6 +233,12 @@ pub async fn get_console(state: State<'_, AppState>, id: String) -> CmdResult<Op
     Ok(state.node.console(&state.renter, &id, 64 * 1024).await?)
 }
 
+/// Keystrokes typed into the guest's console view.
+#[tauri::command]
+pub async fn send_console(state: State<'_, AppState>, id: String, data: String) -> CmdResult<()> {
+    Ok(state.node.console_input(&state.renter, &id, &data).await?)
+}
+
 fn peers(state: &AppState) -> CmdResult<&Peers> {
     Ok(state.node.peers().ok_or_else(|| Error::Unsupported("peering did not start".into()))?)
 }
