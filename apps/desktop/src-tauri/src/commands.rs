@@ -7,6 +7,7 @@ use peervps_core::billing::CollateralState;
 use peervps_core::billing::payments::{self, WebhookOutcome};
 use peervps_core::node::{AccountSummary, DeployRequest, Instance};
 use peervps_core::peer::nat::InternetStatus;
+use peervps_core::peer::relay::RelayStatus;
 use peervps_core::peer::{PeerInfo, PeerOverview, Peers};
 use peervps_core::storage::now_secs;
 use peervps_core::virtualization::accel::AcceleratorKind;
@@ -263,4 +264,10 @@ pub async fn remove_peer(state: State<'_, AppState>, id: String) -> CmdResult<()
 #[tauri::command]
 pub async fn set_internet(state: State<'_, AppState>, enabled: bool) -> CmdResult<InternetStatus> {
     Ok(peers(&state)?.set_internet(enabled).await?)
+}
+
+/// Stay reachable through a relay (`host[:port]`), or stop with `null`.
+#[tauri::command]
+pub async fn set_relay(state: State<'_, AppState>, address: Option<String>) -> CmdResult<RelayStatus> {
+    Ok(peers(&state)?.set_relay(address.as_deref()).await?)
 }

@@ -23,6 +23,7 @@
 //! | POST   | `/v1/peers/{id}/approve`       | let a pending peer rent here         |
 //! | DELETE | `/v1/peers/{id}`               | forget a peer                        |
 //! | PUT    | `/v1/peers/internet`           | `{"enabled":true}`: UPnP port forward |
+//! | PUT    | `/v1/peers/relay`              | `{"address":"host:port"}` or `null`  |
 //! | POST   | `/v1/webhooks/{gateway}`       | signed payment top-ups (no bearer)   |
 
 pub mod market;
@@ -111,6 +112,7 @@ pub fn router(node: Node) -> Router {
         .route("/v1/account", get(account))
         .route("/v1/peers", get(list_peers).post(add_peer))
         .route("/v1/peers/internet", axum::routing::put(set_internet))
+        .route("/v1/peers/relay", axum::routing::put(set_relay))
         .route("/v1/peers/{id}", axum::routing::delete(remove_peer))
         .route("/v1/peers/{id}/approve", post(approve_peer))
         .route("/v1/webhooks/{gateway}", post(webhook))
@@ -233,6 +235,19 @@ async fn set_internet(
     Json(req): Json<SetInternet>,
 ) -> ApiResult<crate::peer::nat::InternetStatus> {
     Ok(Json(peers(&node)?.set_internet(req.enabled).await?))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetRelay {
+    address: Option<String>,
+}
+
+async fn set_relay(
+    State(node): State<Node>,
+    Caller(_): Caller,
+    Json(req): Json<SetRelay>,
+) -> ApiResult<crate::peer::relay::RelayStatus> {
+    Ok(Json(peers(&node)?.set_relay(req.address.as_deref()).await?))
 }
 
 async fn approve_peer(State(node): State<Node>, Caller(_): Caller, Path(id): Path<String>) -> ApiResult<PeerInfo> {

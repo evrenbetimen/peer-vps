@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { commands } from "../bridge/commands";
-import type { InternetStatus, PeerInfo, PeerOverview, PeerStatus } from "../bridge/types";
+import type { InternetStatus, PeerInfo, PeerOverview, PeerStatus, RelayStatus } from "../bridge/types";
 import { Button, Card, ErrorNote, Toggle } from "./ui";
 import { cx } from "../lib/format";
 
@@ -17,6 +17,7 @@ const STATUS: Record<PeerStatus, { label: string; tone: string }> = {
 export function Peers() {
   const [view, setView] = useState<PeerOverview | null>(null);
   const [address, setAddress] = useState("");
+  const [relayAddress, setRelayAddress] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -89,6 +90,20 @@ export function Peers() {
           />
           <InternetLine status={view.internet} invite={view.internetInvite} onCopy={() => copy(view.internetInvite)} />
         </div>
+
+        <RelayBox
+          status={view.relay}
+          invite={view.relayInvite}
+          draft={relayAddress}
+          busy={busy}
+          onDraft={setRelayAddress}
+          onUse={() => void run(async () => {
+            await commands.setRelay(relayAddress);
+            setRelayAddress("");
+          })}
+          onStop={() => void run(() => commands.setRelay(null))}
+          onCopy={() => copy(view.relayInvite)}
+        />
 
         {view.nearby.length > 0 && (
           <div>
@@ -172,6 +187,67 @@ function InternetLine({ status, invite, onCopy }: { status: InternetStatus; invi
     default:
       return <p className="text-xs text-amber-300">{status.detail ?? "Not reachable from other networks."}</p>;
   }
+}
+
+/** A relay joins this machine with peers when neither side can accept connections (CGNAT). */
+function RelayBox(props: {
+  status: RelayStatus;
+  invite: string | null;
+  draft: string;
+  busy: boolean;
+  onDraft: (v: string) => void;
+  onUse: () => void;
+  onStop: () => void;
+  onCopy: () => void;
+}) {
+  const { status, invite } = props;
+  if (status.state === "off") {
+    return (
+      <form
+        className="space-y-1"
+        onSubmit={(e) => {
+          e.preventDefault();
+          props.onUse();
+        }}
+      >
+        <div className="text-xs text-slate-400">Behind your provider's NAT? Stay reachable through a relay (<code className="text-slate-300">peervps relay</code> on any machine others can reach)</div>
+        <div className="flex gap-2">
+          <input
+            aria-label="Relay address"
+            value={props.draft}
+            onChange={(e) => props.onDraft(e.target.value)}
+            placeholder="relay.example.com:7073"
+            className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 placeholder:text-slate-600"
+          />
+          <Button type="submit" variant="ghost" disabled={props.busy || !props.draft.trim()}>
+            Use relay
+          </Button>
+        </div>
+      </form>
+    );
+  }
+  return (
+    <div className="flex items-start justify-between gap-2 text-xs">
+      <div className="min-w-0">
+        <div className="text-slate-400">
+          Relay <span className="font-mono text-slate-200">{status.address}</span> ·{" "}
+          <span className={cx(status.state === "connected" ? "text-emerald-400" : status.state === "retrying" ? "text-amber-300" : "text-slate-400")}>{status.state}</span>
+        </div>
+        {invite && (
+          <div>
+            <span className="text-slate-400">Give this to machines anywhere: </span>
+            <button type="button" onClick={props.onCopy} className="font-mono text-cyan-300 hover:underline" title="Copy">
+              {invite}
+            </button>
+          </div>
+        )}
+        {status.detail && status.state === "retrying" && <div className="truncate text-amber-300">{status.detail}</div>}
+      </div>
+      <Button variant="ghost" onClick={props.onStop} disabled={props.busy}>
+        Stop
+      </Button>
+    </div>
+  );
 }
 
 function PeerRow({ peer, busy, onRemove }: { peer: PeerInfo; busy: boolean; onRemove: () => void }) {

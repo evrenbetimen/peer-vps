@@ -13,6 +13,7 @@ import type {
   HostSnapshot,
   Images,
   InternetStatus,
+  RelayStatus,
   Instance,
   Offer,
   OfferQuery,
@@ -69,4 +70,6 @@ export const commands = {
   removePeer: (id: string) => call<void>("remove_peer", { id }),
   /** Ask the router (UPnP) to forward a port so other networks can add this machine. */
   setInternet: (enabled: boolean) => call<InternetStatus>("set_internet", { enabled }),
+  /** Stay reachable through a relay (`host[:port]`), or stop with null. */
+  setRelay: (address: string | null) => call<RelayStatus>("set_relay", { address }),
 };

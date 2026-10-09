@@ -143,6 +143,7 @@ pub fn run() {
             commands::approve_peer,
             commands::remove_peer,
             commands::set_internet,
+            commands::set_relay,
             images::list_images,
             images::pull_image,
             images::import_image,

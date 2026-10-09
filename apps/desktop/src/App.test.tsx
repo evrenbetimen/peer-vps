@@ -136,4 +136,15 @@ describe("App", () => {
     await user.click(screen.getByRole("switch", { name: /Reachable from other networks/ }));
     expect(await screen.findByText("pv-5c0ffee15ea1ab1e@203.0.113.7:7071", {}, { timeout: 5000 })).toBeInTheDocument();
   });
+
+  it("stays reachable through a relay and stops", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(await screen.findByRole("textbox", { name: "Relay address" }), "relay.example.com");
+    await user.click(screen.getByRole("button", { name: "Use relay" }));
+    expect(await screen.findByText("pv-5c0ffee15ea1ab1e@relay://relay.example.com:7073", {}, { timeout: 5000 })).toBeInTheDocument();
+    expect(screen.getByText("connected")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    expect(await screen.findByRole("textbox", { name: "Relay address" })).toBeInTheDocument();
+  });
 });

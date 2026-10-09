@@ -39,6 +39,15 @@ enum Cmd {
         #[command(flatten)]
         peer: Box<PeerArgs>,
     },
+    /// Run a relay: a machine anyone can reach that joins peers which cannot
+    /// accept connections themselves (both behind CGNAT). It only sees ciphertext.
+    Relay {
+        #[arg(long, default_value = "0.0.0.0:7073")]
+        listen: SocketAddr,
+        /// Where the relay's key lives; defaults to the data dir.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
     /// List marketplace offers.
     Offers {
         #[arg(long)]
@@ -104,6 +113,8 @@ enum PeerCmd {
     Approve { id: String },
     /// Forget a peer.
     Remove { id: String },
+    /// Stay reachable through a relay (`host[:port]`), or `off`.
+    Relay { address: String },
     /// Ask the router (UPnP) to forward a port so machines on other networks can add this one.
     Internet {
         #[arg(value_parser = ["on", "off"])]
@@ -122,6 +133,9 @@ struct PeerArgs {
     /// Ask the router (UPnP) to forward a port so other networks can reach this node.
     #[arg(long)]
     upnp: bool,
+    /// Stay reachable through this relay (`host[:port]`), for machines behind CGNAT.
+    #[arg(long)]
+    relay: Option<String>,
     /// Do not announce this node to, or look for, PeerVPS machines on the LAN.
     #[arg(long)]
     no_discovery: bool,
@@ -306,6 +320,7 @@ async fn main() -> Result<()> {
 
     let out = match cli.cmd {
         Cmd::Serve { listen, db, hv, peer } => return serve(listen, db, hv, *peer).await,
+        Cmd::Relay { listen, state_dir } => return relay(listen, state_dir).await,
         Cmd::Offers { min_vram_mib, max_price_per_hour, min_sla_pct, accelerator, sort } => {
             let mut q: Vec<(&str, String)> = vec![("sort", sort)];
             if let Some(v) = min_vram_mib {
@@ -373,6 +388,10 @@ async fn main() -> Result<()> {
             client.post(&format!("/v1/peers/{id}/approve"), json!({})).await?
         }
         Cmd::Peer { cmd: PeerCmd::Remove { id } } => client.delete(&format!("/v1/peers/{id}")).await?,
+        Cmd::Peer { cmd: PeerCmd::Relay { address } } => {
+            let address = (address != "off").then_some(address);
+            client.put("/v1/peers/relay", json!({ "address": address })).await?
+        }
         Cmd::Peer { cmd: PeerCmd::Internet { state } } => {
             client.put("/v1/peers/internet", json!({ "enabled": state == "on" })).await?
         }
@@ -404,6 +423,18 @@ async fn serve(listen: SocketAddr, db: Option<PathBuf>, hv: HypervisorArgs, peer
     });
     tokio::select! {
         r = peervps_core::api::serve(node, listen) => r?,
+        _ = tokio::signal::ctrl_c() => eprintln!("shutting down"),
+    }
+    Ok(())
+}
+
+async fn relay(listen: SocketAddr, state_dir: Option<PathBuf>) -> Result<()> {
+    use peervps_core::peer::{Identity, relay};
+    let identity = Identity::load_or_create(&state_dir.unwrap_or_else(data_dir).join("relay.key"))?;
+    let (bound, task) = relay::serve(listen, identity).await.with_context(|| format!("listen on {listen}"))?;
+    eprintln!("relaying on {bound}; nodes use it with `peervps peer relay <this machine's address>:{}`", bound.port());
+    tokio::select! {
+        _ = task => {}
         _ = tokio::signal::ctrl_c() => eprintln!("shutting down"),
     }
     Ok(())
@@ -452,6 +483,9 @@ async fn start_peering(node: &Node, addr: SocketAddr, a: PeerArgs) -> Result<()>
     }
     if a.upnp {
         peers.set_internet(true).await?;
+    }
+    if let Some(relay) = &a.relay {
+        peers.set_relay(Some(relay)).await?;
     }
     for target in &a.peers {
         match peers.add(target).await {

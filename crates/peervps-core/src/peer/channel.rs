@@ -128,6 +128,15 @@ impl Channel {
         self.tx.send(msg).await
     }
 
+    /// The TCP connection underneath, for a relay that has finished talking on
+    /// this channel and now splices it to another one.
+    pub fn into_stream(self) -> Result<TcpStream> {
+        if !self.rx.pending.is_empty() {
+            return Err(Error::Invalid("unread data on the channel".into()));
+        }
+        self.rx.r.reunite(self.tx.w).map_err(|e| Error::Io(std::io::Error::other(e.to_string())))
+    }
+
     pub async fn recv(&mut self) -> Result<Vec<u8>> {
         self.rx.recv().await
     }
