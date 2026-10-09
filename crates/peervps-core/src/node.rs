@@ -15,6 +15,8 @@ use crate::failover::FailoverController;
 use crate::failover::heartbeat::HeartbeatConfig;
 use crate::failover::sla::{SlaEnforcer, SlaPolicy};
 use crate::network::{OVERLAY_NET, Route, RoutingTable};
+use crate::peer::Peers;
+use crate::peer::proto::Request as PeerRequest;
 use crate::storage::{Store, now_secs};
 use crate::virtualization::accel::{AcceleratorDevice, AcceleratorKind, PartitionedAccelerators};
 use crate::virtualization::confidential::{self, MemoryEncryption, NoEncryption, SevSnpStub, TeeKind};
@@ -30,7 +32,7 @@ pub enum InstanceState {
     Terminated,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Instance {
     pub id: String,
@@ -42,6 +44,9 @@ pub struct Instance {
     pub virtual_ip: Ipv4Addr,
     pub price_per_sec: i64,
     pub created_at: i64,
+    /// Peer id of the node running it, when rented from another node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     #[serde(skip)]
     billing_segment: u32,
 }
@@ -108,6 +113,7 @@ pub struct Node {
     instances: Arc<Mutex<HashMap<String, Instance>>>,
     api_keys: Arc<RwLock<HashMap<blake3::Hash, String>>>,
     next_vip: Arc<Mutex<u32>>,
+    peers: Arc<std::sync::OnceLock<Peers>>,
 }
 
 impl Node {
@@ -147,6 +153,7 @@ impl Node {
             instances: Arc::new(Mutex::new(HashMap::new())),
             api_keys: Arc::new(RwLock::new(HashMap::new())),
             next_vip: Arc::new(Mutex::new(10)),
+            peers: Arc::new(std::sync::OnceLock::new()),
         })
     }
 
@@ -201,11 +208,71 @@ impl Node {
         offers.push(offer);
     }
 
+    /// Our own offers and those of the peers we rent from.
     pub async fn offers(&self, query: &OfferQuery) -> Vec<Offer> {
-        query.apply(&self.offers.read().await)
+        let mut all = self.offers.read().await.clone();
+        if let Some(peers) = self.peers() {
+            all.extend(peers.remote_offers().await);
+        }
+        query.apply(&all)
+    }
+
+    /// Offers this machine runs itself (what peers may rent).
+    pub async fn local_offers(&self) -> Vec<Offer> {
+        self.offers.read().await.iter().filter(|o| o.provider == self.config.node_id).cloned().collect()
+    }
+
+    /// The peer network, once one is attached.
+    pub fn peers(&self) -> Option<&Peers> {
+        self.peers.get()
+    }
+
+    pub(crate) fn attach_peers(&self, peers: Peers) -> Result<()> {
+        self.peers.set(peers).map_err(|_| Error::Invalid("node already has a peer network".into()))
+    }
+
+    /// The peer running `inst`, if it is rented from another node.
+    fn remote<'a>(&'a self, inst: &Instance) -> Result<Option<(&'a Peers, String)>> {
+        match &inst.host {
+            None => Ok(None),
+            Some(host) => {
+                let peers = self.peers().ok_or_else(|| Error::Peer(format!("no peer network to reach {host}")))?;
+                Ok(Some((peers, host.clone())))
+            }
+        }
+    }
+
+    async fn deploy_remote(&self, peers: &Peers, renter: &str, host: &str, req: DeployRequest) -> Result<Instance> {
+        let offer_id = req.offer_id.clone();
+        let (_, remote_offer) = offer_id.split_once('/').unwrap_or((host, &offer_id));
+        let theirs = peers.deploy(host, remote_offer, req).await?;
+        let inst =
+            Instance { renter: renter.to_owned(), offer_id, host: Some(host.to_owned()), billing_segment: 0, ..theirs };
+        self.instances.lock().await.insert(inst.id.clone(), inst.clone());
+        Ok(inst)
+    }
+
+    /// Store the host's view of a remote instance under our renter and offer id.
+    async fn keep_remote(&self, ours: &Instance, theirs: Instance) -> Instance {
+        let inst = Instance {
+            renter: ours.renter.clone(),
+            offer_id: ours.offer_id.clone(),
+            host: ours.host.clone(),
+            billing_segment: 0,
+            ..theirs
+        };
+        self.instances.lock().await.insert(inst.id.clone(), inst.clone());
+        inst
     }
 
     pub async fn deploy(&self, renter: &str, req: DeployRequest) -> Result<Instance> {
+        if let Some(peers) = self.peers()
+            && let Some((host, _)) = req.offer_id.split_once('/')
+            && peers.is_peer(host).await
+        {
+            let host = host.to_owned();
+            return self.deploy_remote(peers, renter, &host, req).await;
+        }
         let offer = self
             .offers
             .read()
@@ -247,6 +314,7 @@ impl Node {
             virtual_ip: vip,
             price_per_sec: offer.price_per_sec,
             created_at: now_secs(),
+            host: None,
             billing_segment: 0,
         };
         self.ensure_billable(&offer.provider).await?;
@@ -279,6 +347,10 @@ impl Node {
     /// Scale to zero (hibernate + stop billing) or back to one.
     pub async fn scale(&self, renter: &str, id: &str, replicas: u32) -> Result<Instance> {
         let inst = self.instance(renter, id).await?;
+        if let Some((peers, host)) = self.remote(&inst)? {
+            let theirs = peers.instance_call(&host, PeerRequest::Scale { id: id.to_owned(), replicas }).await?;
+            return Ok(self.keep_remote(&inst, theirs).await);
+        }
         let provider = self
             .offers
             .read()
@@ -310,6 +382,16 @@ impl Node {
 
     pub async fn terminate(&self, renter: &str, id: &str) -> Result<Instance> {
         let inst = self.instance(renter, id).await?;
+        if let Some((peers, host)) = self.remote(&inst)? {
+            let theirs = match peers.instance_call(&host, PeerRequest::Terminate { id: id.to_owned() }).await {
+                Ok(theirs) => theirs,
+                // The host already forgot it (e.g. it restarted): nothing left to stop.
+                Err(Error::NotFound(_)) => Instance { state: InstanceState::Terminated, ..inst.clone() },
+                Err(e) => return Err(e),
+            };
+            peers.stop_forwards(id).await;
+            return Ok(self.keep_remote(&inst, theirs).await);
+        }
         if inst.state == InstanceState::Running {
             self.meter.stop(&inst.billing_id(), now_secs()).await?;
         }
@@ -327,6 +409,9 @@ impl Node {
         if inst.state == InstanceState::Terminated {
             return Ok(None);
         }
+        if let Some((peers, host)) = self.remote(&inst)? {
+            return peers.console(&host, id, max_bytes).await;
+        }
         self.provisioner.hypervisor().console_tail(inst.vm, max_bytes).await
     }
 
@@ -335,6 +420,9 @@ impl Node {
         let inst = self.instance(renter, id).await?;
         if inst.state == InstanceState::Terminated {
             return Ok(None);
+        }
+        if let Some((peers, host)) = self.remote(&inst)? {
+            return peers.access(&host, id).await;
         }
         self.provisioner.hypervisor().access(inst.vm).await
     }

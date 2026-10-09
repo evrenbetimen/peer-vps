@@ -52,6 +52,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 snow = { version = "0.10", features = ["risky-raw-split"] }
+socket2 = { version = "0.6", features = ["all"] }
 subtle = "2"
 sysinfo = { version = "0.39", default-features = false, features = ["system", "network", "component"] }
 thiserror = "2"

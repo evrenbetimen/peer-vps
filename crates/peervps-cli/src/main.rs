@@ -36,6 +36,8 @@ enum Cmd {
         db: Option<PathBuf>,
         #[command(flatten)]
         hv: HypervisorArgs,
+        #[command(flatten)]
+        peer: Box<PeerArgs>,
     },
     /// List marketplace offers.
     Offers {
@@ -85,6 +87,57 @@ enum Cmd {
     Terminate { id: String },
     /// Balance and recent ledger entries.
     Account,
+    /// Rent from (and to) other PeerVPS nodes. The node must run with `--peer-listen`.
+    Peer {
+        #[command(subcommand)]
+        cmd: PeerCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PeerCmd {
+    /// This node's peer id and invite, and every known peer.
+    List,
+    /// Add a peer by its invite (`pv-…@host:port`) or address (`host[:port]`).
+    Add { address: String },
+    /// Let a pending peer rent from this node.
+    Approve { id: String },
+    /// Forget a peer.
+    Remove { id: String },
+    /// Ask the router (UPnP) to forward a port so machines on other networks can add this one.
+    Internet {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+}
+
+#[derive(Debug, clap::Args)]
+struct PeerArgs {
+    /// Accept other nodes on this address, e.g. 0.0.0.0:7071, and rent this machine to them.
+    #[arg(long)]
+    peer_listen: Option<SocketAddr>,
+    /// Peer to add on start (`pv-…@host:port`); repeatable.
+    #[arg(long = "peer")]
+    peers: Vec<String>,
+    /// Ask the router (UPnP) to forward a port so other networks can reach this node.
+    #[arg(long)]
+    upnp: bool,
+    /// Do not announce this node to, or look for, PeerVPS machines on the LAN.
+    #[arg(long)]
+    no_discovery: bool,
+    /// Where the node key and the peer list live; defaults to the data dir.
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+    /// vCPUs offered to peers; defaults to half of this machine's.
+    #[arg(long)]
+    offer_vcpus: Option<u32>,
+    #[arg(long, default_value_t = 8192)]
+    offer_mem_mib: u64,
+    #[arg(long, default_value_t = 100)]
+    offer_disk_gib: u64,
+    /// Asking price, µcredits per vCPU-second.
+    #[arg(long, default_value_t = 150)]
+    price_per_core_sec: i64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -252,7 +305,7 @@ async fn main() -> Result<()> {
     let client = Client { http: reqwest::Client::new(), base: cli.api.trim_end_matches('/').to_owned(), key: cli.key };
 
     let out = match cli.cmd {
-        Cmd::Serve { listen, db, hv } => return serve(listen, db, hv).await,
+        Cmd::Serve { listen, db, hv, peer } => return serve(listen, db, hv, *peer).await,
         Cmd::Offers { min_vram_mib, max_price_per_hour, min_sla_pct, accelerator, sort } => {
             let mut q: Vec<(&str, String)> = vec![("sort", sort)];
             if let Some(v) = min_vram_mib {
@@ -314,12 +367,21 @@ async fn main() -> Result<()> {
         Cmd::Image { cmd } => image(cmd).await?,
         Cmd::Terminate { id } => client.delete(&format!("/v1/instances/{id}")).await?,
         Cmd::Account => client.get("/v1/account", &[]).await?,
+        Cmd::Peer { cmd: PeerCmd::List } => client.get("/v1/peers", &[]).await?,
+        Cmd::Peer { cmd: PeerCmd::Add { address } } => client.post("/v1/peers", json!({ "address": address })).await?,
+        Cmd::Peer { cmd: PeerCmd::Approve { id } } => {
+            client.post(&format!("/v1/peers/{id}/approve"), json!({})).await?
+        }
+        Cmd::Peer { cmd: PeerCmd::Remove { id } } => client.delete(&format!("/v1/peers/{id}")).await?,
+        Cmd::Peer { cmd: PeerCmd::Internet { state } } => {
+            client.put("/v1/peers/internet", json!({ "enabled": state == "on" })).await?
+        }
     };
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
 
-async fn serve(listen: SocketAddr, db: Option<PathBuf>, hv: HypervisorArgs) -> Result<()> {
+async fn serve(listen: SocketAddr, db: Option<PathBuf>, hv: HypervisorArgs, peer: PeerArgs) -> Result<()> {
     let hypervisor = hv.build()?;
     eprintln!("hypervisor: {}", hypervisor.name());
     let store = match db {
@@ -328,6 +390,11 @@ async fn serve(listen: SocketAddr, db: Option<PathBuf>, hv: HypervisorArgs) -> R
     };
     let (node, key) = Node::demo_with_hypervisor(store, hypervisor).await?;
     eprintln!("demo renter API key: {key}");
+    if let Some(addr) = peer.peer_listen {
+        start_peering(&node, addr, peer).await?;
+    } else if !peer.peers.is_empty() {
+        bail!("--peer needs --peer-listen");
+    }
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     tokio::spawn(node.meter.clone().run(tx));
     tokio::spawn(async move {
@@ -339,6 +406,65 @@ async fn serve(listen: SocketAddr, db: Option<PathBuf>, hv: HypervisorArgs) -> R
         r = peervps_core::api::serve(node, listen) => r?,
         _ = tokio::signal::ctrl_c() => eprintln!("shutting down"),
     }
+    Ok(())
+}
+
+/// Rent a slice of this machine to approved peers and connect to the given ones.
+async fn start_peering(node: &Node, addr: SocketAddr, a: PeerArgs) -> Result<()> {
+    use peervps_core::api::market::Offer;
+    use peervps_core::peer::{Identity, Peers};
+    use peervps_core::virtualization::HostBudget;
+    use peervps_core::virtualization::accel::AcceleratorKind;
+
+    let dir = a.state_dir.unwrap_or_else(data_dir);
+    let identity = Identity::load_or_create(&dir.join("node.key"))?;
+    let peers = Peers::attach(node, identity, Some(dir.join("peers.json")))?;
+    let bound = peers.listen(addr).await.with_context(|| format!("listen for peers on {addr}"))?;
+
+    let cores = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(2);
+    let vcpus = a.offer_vcpus.unwrap_or((cores / 2).max(1));
+    node.provisioner
+        .set_budget(HostBudget { cores: (0..vcpus).collect(), mem_mib: a.offer_mem_mib, disk_gib: a.offer_disk_gib })
+        .await?;
+    let collateral = node.collateral.state(&node.config.node_id).await.map(|c| c.locked).unwrap_or(0);
+    node.publish_offer(Offer {
+        id: "this-machine".into(),
+        provider: node.config.node_id.clone(),
+        region: "peer".into(),
+        vcpus,
+        mem_mib: a.offer_mem_mib,
+        disk_gib: a.offer_disk_gib,
+        accelerator: AcceleratorKind::None,
+        accelerator_model: None,
+        vram_mib: 0,
+        price_per_sec: a.price_per_core_sec * i64::from(vcpus),
+        sla_pct: 100.0,
+        confidential: false,
+        collateral_locked: collateral,
+    })
+    .await;
+
+    if !a.no_discovery {
+        let (beacons, targets) = peervps_core::peer::discovery::lan();
+        if let Err(e) = peers.discover(beacons, targets).await {
+            eprintln!("not announcing on the LAN: {e}");
+        }
+    }
+    if a.upnp {
+        peers.set_internet(true).await?;
+    }
+    for target in &a.peers {
+        match peers.add(target).await {
+            Ok(p) => eprintln!("peer {}: {:?}", p.id, p.status),
+            Err(e) => eprintln!("peer {target}: {e}"),
+        }
+    }
+    peers.spawn_refresh(std::time::Duration::from_secs(10));
+    let invite = peers.overview().await.invite.unwrap_or_else(|| bound.to_string());
+    eprintln!(
+        "peer id {} accepting peers on {bound}; others add this node with: peervps peer add {invite}",
+        peers.id()
+    );
     Ok(())
 }
 
@@ -364,6 +490,10 @@ impl Client {
 
     async fn post(&self, path: &str, body: Value) -> Result<Value> {
         Self::finish(self.req(reqwest::Method::POST, path).json(&body)).await
+    }
+
+    async fn put(&self, path: &str, body: Value) -> Result<Value> {
+        Self::finish(self.req(reqwest::Method::PUT, path).json(&body)).await
     }
 
     async fn delete(&self, path: &str) -> Result<Value> {

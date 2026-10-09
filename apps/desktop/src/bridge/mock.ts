@@ -8,9 +8,13 @@ import type {
   HostSnapshot,
   Images,
   Instance,
+  InternetStatus,
+  NearbyPeer,
   NodeEvent,
   Offer,
   OfferQuery,
+  PeerInfo,
+  PeerOverview,
   Topology,
   VmSpec,
 } from "./types";
@@ -22,6 +26,19 @@ const offers: Offer[] = [
   { id: "ams-4090-2", provider: "node-ams-4090-2", region: "eu-west", vcpus: 8, memMib: 32768, diskGib: 200, accelerator: "gpu", acceleratorModel: "RTX 4090 (½)", vramMib: 12288, pricePerSec: 5000, slaPct: 99.7, confidential: false, collateralLocked: 500 * C },
   { id: "iad-h100-3", provider: "node-iad-h100-3", region: "us-east", vcpus: 16, memMib: 131072, diskGib: 200, accelerator: "gpu", acceleratorModel: "H100 MIG 3g.40gb", vramMib: 40960, pricePerSec: 26388, slaPct: 99.9, confidential: true, collateralLocked: 500 * C },
 ];
+const ME = "pv-5c0ffee15ea1ab1e";
+/** A peer's own "this-machine" offer, as it lists it to us. */
+const remoteOffer = (): Offer => ({ id: "this-machine", provider: "local", region: "local", vcpus: 4, memMib: 16384, diskGib: 200, accelerator: "none", acceleratorModel: null, vramMib: 0, pricePerSec: 600, slaPct: 100, confidential: false, collateralLocked: 150 * C });
+const peers: PeerInfo[] = [
+  { id: "pv-3f9c1a7e2b4d6c80", publicKey: "3f9c1a7e2b4d6c80".padEnd(64, "0"), address: "192.168.1.20:7071", trusted: true, status: "online", offers: [remoteOffer()], lastSeen: Math.floor(Date.now() / 1000), error: null },
+  { id: "pv-a17b0c55e9d24f13", publicKey: "a17b0c55e9d24f13".padEnd(64, "0"), address: "192.168.1.31:7071", trusted: false, status: "pending", offers: [], lastSeen: Math.floor(Date.now() / 1000), error: null },
+];
+let internet: InternetStatus = { state: "off", address: null, detail: null };
+const nearby: NearbyPeer[] = [{ id: "pv-b2e4f6a8c0d1e3f5", invite: "pv-b2e4f6a8c0d1e3f5@192.168.1.44:7071", lastSeen: Math.floor(Date.now() / 1000) }];
+/** Peers' offers as the node lists them: `<peer>/<offer>`, provided by the peer. */
+function peerOffers(): Offer[] {
+  return peers.filter((p) => p.status === "online").flatMap((p) => p.offers.map((o) => ({ ...o, id: `${p.id}/${o.id}`, provider: p.id, region: `${o.region} via ${p.id}` })));
+}
 let allocation: HostAllocation = { maxCores: 8, maxMemMib: 32768, maxDiskGib: 500, gpuEnabled: true, pricePerCoreSec: 150 };
 const instances: Instance[] = [];
 const wallet: AccountSummary = { account: "demo-agent", balance: 50 * C, history: [] };
@@ -108,7 +125,7 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         return allocation;
       case "list_offers": {
         const q = (args.query ?? {}) as OfferQuery;
-        return offers.filter(
+        return [...offers, ...peerOffers()].filter(
           (o) =>
             (q.minVramMib === undefined || o.vramMib >= q.minVramMib) &&
             (q.maxPricePerHour === undefined || o.pricePerSec * 3600 <= q.maxPricePerHour) &&
@@ -117,7 +134,7 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       }
       case "deploy_instance": {
         const { offerId, spec } = args.request as { offerId: string; spec: VmSpec };
-        const offer = offers.find((o) => o.id === offerId);
+        const offer = [...offers, ...peerOffers()].find((o) => o.id === offerId);
         if (!offer) throw { code: "not_found", message: `offer ${offerId}` };
         const inst: Instance = {
           id: `inst-${Math.random().toString(16).slice(2, 14)}`,
@@ -129,6 +146,7 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
           virtualIp: `10.147.0.${11 + instances.length}`,
           pricePerSec: offer.pricePerSec,
           createdAt: Math.floor(Date.now() / 1000),
+          ...(offerId.includes("/") ? { host: offer.provider } : {}),
         };
         instances.unshift(inst);
         return inst;
@@ -187,6 +205,51 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       case "get_console": {
         const inst = instances.find((i) => i.id === args.id);
         if (!inst) throw { code: "not_found", message: `instance ${String(args.id)}` };
+        return null;
+      }
+      case "get_peers":
+        return {
+          id: ME,
+          listen: "0.0.0.0:7071",
+          invite: `${ME}@192.168.1.10:7071`,
+          internetInvite: internet.address ? `${ME}@${internet.address}` : null,
+          internet,
+          nearby: nearby.filter((n) => !peers.some((p) => p.id === n.id)),
+          peers,
+        } satisfies PeerOverview;
+      case "set_internet":
+        if (!args.enabled) {
+          internet = { state: "off", address: null, detail: null };
+        } else {
+          internet = { state: "checking", address: null, detail: null };
+          setTimeout(() => {
+            if (internet.state === "checking") internet = { state: "open", address: "203.0.113.7:7071", detail: "the router forwards TCP 7071 to 192.168.1.10:7071" };
+          }, 300);
+        }
+        return internet;
+      case "add_peer": {
+        const address = String(args.address ?? "").trim();
+        const [want, addr] = address.includes("@") ? address.split("@", 2) : [null, address];
+        if (!addr) throw { code: "invalid_argument", message: "give the peer's address, e.g. 192.168.1.20:7071" };
+        if (addr.startsWith("127.0.0.1:1")) throw { code: "peer_unavailable", message: `cannot reach ${addr}: connection refused` };
+        const id = want ?? `pv-${Array.from(addr).reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7).toString(16).padStart(16, "0").slice(0, 16)}`;
+        let peer = peers.find((p) => p.id === id);
+        if (!peer) {
+          peer = { id, publicKey: id.slice(3).padEnd(64, "0"), address: addr.includes(":") ? addr : `${addr}:7071`, trusted: true, status: "waitingForApproval", offers: [], lastSeen: Math.floor(Date.now() / 1000), error: `waiting for the owner of ${id} to approve ${ME}` };
+          peers.push(peer);
+        }
+        return peer;
+      }
+      case "approve_peer": {
+        const peer = peers.find((p) => p.id === args.id);
+        if (!peer) throw { code: "not_found", message: `peer ${String(args.id)}` };
+        Object.assign(peer, { trusted: true, status: "online", offers: [remoteOffer()], error: null });
+        return peer;
+      }
+      case "remove_peer": {
+        const i = peers.findIndex((p) => p.id === args.id);
+        if (i < 0) throw { code: "not_found", message: `peer ${String(args.id)}` };
+        peers.splice(i, 1);
         return null;
       }
       case "list_images":

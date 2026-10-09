@@ -50,6 +50,25 @@ fn pick_hypervisor(data_dir: &std::path::Path) -> (Arc<dyn Hypervisor>, Option<S
     }
 }
 
+/// Accept other PeerVPS machines on the LAN (port 7071, or any free port when
+/// it is taken) and keep the peers' offers fresh.
+async fn start_peering(node: &Node, data_dir: &std::path::Path) -> peervps_core::Result<()> {
+    use peervps_core::peer::{DEFAULT_PORT, Identity, Peers};
+    let identity = Identity::load_or_create(&data_dir.join("node.key"))?;
+    let peers = Peers::attach(node, identity, Some(data_dir.join("peers.json")))?;
+    let any = std::net::Ipv4Addr::UNSPECIFIED;
+    if let Err(e) = peers.listen((any, DEFAULT_PORT).into()).await {
+        tracing::warn!(error = %e, "port {DEFAULT_PORT} is taken; accepting peers on a free port");
+        peers.listen((any, 0).into()).await?;
+    }
+    let (beacons, targets) = peervps_core::peer::discovery::lan();
+    if let Err(e) = peers.discover(beacons, targets).await {
+        tracing::warn!(error = %e, "not announcing this machine on the LAN");
+    }
+    peers.spawn_refresh(std::time::Duration::from_secs(10));
+    Ok(())
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
@@ -91,6 +110,7 @@ pub fn run() {
             });
 
             tauri::async_runtime::block_on(commands::publish_local_offer(&node, &allocation));
+            tauri::async_runtime::block_on(start_peering(&node, &data_dir))?;
             app.manage(AppState {
                 node,
                 renter: "demo-agent".into(),
@@ -118,6 +138,11 @@ pub fn run() {
             commands::get_instance_access,
             commands::get_console,
             commands::open_guest_screen,
+            commands::get_peers,
+            commands::add_peer,
+            commands::approve_peer,
+            commands::remove_peer,
+            commands::set_internet,
             images::list_images,
             images::pull_image,
             images::import_image,

@@ -18,6 +18,11 @@
 //! | GET    | `/v1/instances/{id}/console`   | tail of the guest serial console     |
 //! | GET    | `/v1/instances/{id}/access`    | SSH endpoint, user and password      |
 //! | GET    | `/v1/account`                  | balance + ledger                     |
+//! | GET    | `/v1/peers`                    | this node's peer id, invite, peers   |
+//! | POST   | `/v1/peers`                    | `{"address":"pv-…@host:port"}`       |
+//! | POST   | `/v1/peers/{id}/approve`       | let a pending peer rent here         |
+//! | DELETE | `/v1/peers/{id}`               | forget a peer                        |
+//! | PUT    | `/v1/peers/internet`           | `{"enabled":true}`: UPnP port forward |
 //! | POST   | `/v1/webhooks/{gateway}`       | signed payment top-ups (no bearer)   |
 
 pub mod market;
@@ -35,6 +40,7 @@ use serde_json::json;
 use crate::Error;
 use crate::billing::payments::{self, WebhookOutcome};
 use crate::node::{AccountSummary, DeployRequest, Instance, Node};
+use crate::peer::{PeerInfo, PeerOverview};
 use market::{Offer, OfferQuery};
 
 pub const SIGNATURE_HEADER: &str = "peervps-signature";
@@ -60,6 +66,7 @@ impl IntoResponse for ApiError {
             Error::Unsupported(_) => (StatusCode::NOT_IMPLEMENTED, "unsupported"),
             // Operator-facing detail (boot failures, bad images) is what an agent needs to retry elsewhere.
             Error::Hypervisor(_) => (StatusCode::SERVICE_UNAVAILABLE, "hypervisor_error"),
+            Error::Peer(_) => (StatusCode::BAD_GATEWAY, "peer_unavailable"),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
         let message = if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -102,6 +109,10 @@ pub fn router(node: Node) -> Router {
         .route("/v1/instances/{id}/console", get(console))
         .route("/v1/instances/{id}/access", get(access))
         .route("/v1/account", get(account))
+        .route("/v1/peers", get(list_peers).post(add_peer))
+        .route("/v1/peers/internet", axum::routing::put(set_internet))
+        .route("/v1/peers/{id}", axum::routing::delete(remove_peer))
+        .route("/v1/peers/{id}/approve", post(approve_peer))
         .route("/v1/webhooks/{gateway}", post(webhook))
         .with_state(node)
 }
@@ -194,6 +205,49 @@ async fn account(State(node): State<Node>, Caller(who): Caller) -> ApiResult<Acc
     Ok(Json(node.account(&who).await?))
 }
 
+fn peers(node: &Node) -> Result<&crate::peer::Peers, ApiError> {
+    Ok(node.peers().ok_or_else(|| Error::Unsupported("peering is off; start the node with --peer-listen".into()))?)
+}
+
+async fn list_peers(State(node): State<Node>, Caller(_): Caller) -> ApiResult<PeerOverview> {
+    Ok(Json(peers(&node)?.overview().await))
+}
+
+#[derive(Debug, Deserialize)]
+struct AddPeer {
+    address: String,
+}
+
+async fn add_peer(State(node): State<Node>, Caller(_): Caller, Json(req): Json<AddPeer>) -> ApiResult<PeerInfo> {
+    Ok(Json(peers(&node)?.add(&req.address).await?))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetInternet {
+    enabled: bool,
+}
+
+async fn set_internet(
+    State(node): State<Node>,
+    Caller(_): Caller,
+    Json(req): Json<SetInternet>,
+) -> ApiResult<crate::peer::nat::InternetStatus> {
+    Ok(Json(peers(&node)?.set_internet(req.enabled).await?))
+}
+
+async fn approve_peer(State(node): State<Node>, Caller(_): Caller, Path(id): Path<String>) -> ApiResult<PeerInfo> {
+    Ok(Json(peers(&node)?.approve(&id).await?))
+}
+
+async fn remove_peer(
+    State(node): State<Node>,
+    Caller(_): Caller,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    peers(&node)?.remove(&id).await?;
+    Ok(Json(json!({ "removed": id })))
+}
+
 async fn webhook(
     State(node): State<Node>,
     Path(gateway): Path<String>,
@@ -236,6 +290,10 @@ mod tests {
 
         let (s, _) = call(&app, Request::get("/v1/account").body(Body::empty()).expect("req")).await;
         assert_eq!(s, StatusCode::UNAUTHORIZED);
+        let (s, err) =
+            call(&app, Request::get("/v1/peers").header("authorization", &bearer).body(Body::empty()).expect("req"))
+                .await;
+        assert_eq!((s, err["error"]["code"].as_str()), (StatusCode::NOT_IMPLEMENTED, Some("unsupported")));
 
         let body = json!({ "offerId": "fra-cpu-1", "spec": { "vcpus": 2, "memMib": 4096, "diskGib": 20, "image": "ubuntu-24.04" } });
         let (s, inst) = call(

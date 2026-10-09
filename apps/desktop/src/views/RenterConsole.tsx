@@ -216,7 +216,7 @@ export function RenterConsole() {
                 <div>
                   <div className="font-mono">{i.id}</div>
                   <div className="text-xs text-slate-400">
-                    {i.spec.image} · {i.virtualIp} · {perHour(i.pricePerSec)} · <span className={cx(i.state === "running" ? "text-emerald-400" : "text-slate-500")}>{i.state}</span>
+                    {i.spec.image} · {i.host ? `on ${i.host}` : i.virtualIp} · {perHour(i.pricePerSec)} · <span className={cx(i.state === "running" ? "text-emerald-400" : "text-slate-500")}>{i.state}</span>
                   </div>
                   {i.state !== "terminated" && <AccessLine instance={i} />}
                 </div>

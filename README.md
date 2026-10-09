@@ -111,13 +111,51 @@ You still pick the language, edition and disk on the installer screen. Requireme
   guests and its network driver is installed on first sign-in.
 - Scale to zero is not available for ISO-installed guests yet; pause or terminate them instead.
 
+## Renting between machines (peers)
+
+Two PeerVPS machines can rent VMs from each other directly. Each node has its own key (`node.key` in the data
+directory) and a peer id derived from it, like `pv-471a2ac53bb0f16c`. Nodes talk over TCP port 7071 with a
+Noise `XX` handshake (X25519, ChaChaPoly, BLAKE2s), so every connection is encrypted and both machines prove
+their key.
+
+1. On the machine that will host, open **Host → Peers** and copy its invite (`pv-…@192.168.1.20:7071`), or
+   run `peervps serve --peer-listen 0.0.0.0:7071` and read the invite it prints.
+2. On the other machine, paste the invite into **Add peer** (or `peervps peer add <invite>`). The key is
+   pinned; if a different machine answers on that address later, it is refused.
+3. The host sees the newcomer under **wants to rent from you** and clicks **Approve** (`peervps peer approve
+   <id>`). Approving also connects back, so from then on both can rent from each other.
+4. The host's own offer shows up in the other machine's **Console** as `<peer id>/this-machine`. Deploy,
+   scale to zero, terminate, the console, SSH, Remote Desktop and the installer screen all work as for a
+   local VM: the VM runs on the host, and its ports are carried through the encrypted connection to ports on
+   the renter's `127.0.0.1`. Nothing on the host is exposed beyond its own loopback.
+
+Machines on the same network find each other: each one announces itself on UDP port 7072, and the others
+list it under **On this network** with an **Add** button (`nearby` in `peervps peer list`). The announcement
+only saves typing; adding still checks the key the machine proves.
+
+To be added from **another network**, turn on **Reachable from other networks** (`peervps peer internet on`,
+or `serve --upnp`). PeerVPS asks the router over UPnP to forward a TCP port to this machine, checks with a
+public STUN server what address the internet sees, and shows a second invite with that address. It tells you
+plainly when this cannot work:
+
+- the router does not answer UPnP: turn UPnP on in the router, or forward TCP 7071 to this machine by hand;
+- the router's own internet address is private or `100.64.x.x`, or differs from what STUN sees: the provider
+  (or a second modem) shares one address between customers (CGNAT), and nothing on your side can open a port.
+  The other machine can still add you if it is reachable, since either side can host. A relay for two
+  machines that are both behind CGNAT is not built yet.
+
+The image must be installed on the host (pull or import it there). Money does not cross machines yet: the
+host gives each new peer a one-time 50-credit welcome balance and bills it per second in its own ledger.
+The REST API mirrors all of it: `GET/POST /v1/peers`, `POST /v1/peers/{id}/approve`,
+`DELETE /v1/peers/{id}`, `PUT /v1/peers/internet`.
+
 ## What is real and what is a stub
 
 | Area | Working today | Stubbed behind a trait (next steps) |
 |---|---|---|
 | Virtualization | Resource allocator with core pinning, RAM/disk budgets, fractional GPU/NPU slice accounting; **QEMU backend runs real VMs on Linux, macOS and Windows** (cloud images, copy-on-write disks, cloud-init login, SSH port forward, pause/resume, snapshot + restore, serial console); **Firecracker backend boots real MicroVMs** (per-VM disk, pinned cores, optional bridged tap NIC, pause/resume, full snapshot + restore, serial console); raw KVM backend creates VM, RAM and vCPUs | Firecracker `jailer` hardening, reflink/overlay disks, GPU passthrough (needs a QEMU/cloud-hypervisor backend), SEV-SNP/TDX launch and real attestation |
 | Proof of compute | Nonce-bound sequential BLAKE3 hash-chain with spot-check verification and tier timing | Succinct ZK proof (zkVM receipt) behind the same `ComputeProver`/`ComputeVerifier` traits |
-| Network | Tunnel codec (zstd → ChaCha20-Poly1305, replay window), Noise IK handshake (`snow`), STUN client/responder, UDP hole punching with port spraying, overlay routing table, Linux TUN pump | TURN relay fallback, DHT RPCs on the wire, QUIC snapshot transport |
+| Network | Tunnel codec (zstd → ChaCha20-Poly1305, replay window), Noise IK handshake (`snow`), STUN client/responder, UDP hole punching with port spraying, overlay routing table, Linux TUN pump; **node-to-node renting over Noise XX TCP** (pinned keys, approval, remote deploy and port carrying), LAN discovery beacons, UPnP IGD port forwarding with STUN and CGNAT detection | TURN relay fallback, DHT RPCs on the wire, QUIC snapshot transport, a relay for peers that are both behind CGNAT, cross-node settlement |
 | Failover | Authenticated heartbeats, 3-miss detection, route flip to standby, snapshot seal/open (zstd + chunked AEAD), SIGTERM/SIGINT hibernation, dirty-block replication, SLA slashing | logind shutdown inhibitor, replica restore path |
 | Billing | Integer µcredit ledger with journal, per-second settlement (drift-free), platform fee, suspension on empty balance, collateral lock/unlock/slash, pooled staking with pro-rata slashing, HMAC-SHA256 webhooks with replay window and idempotency | Real payment provider integration (an `HttpGateway` skeleton exists) |
 | API | REST `/v1` (offers, deploy, scale to zero, terminate, account, webhooks), CLI | tonic server for the `.proto` contract, event streaming |

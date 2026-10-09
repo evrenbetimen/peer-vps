@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Batch, Instance, Offer, Topology } from "./types";
+import type { Batch, InternetStatus, Instance, Offer, PeerInfo, PeerOverview, Topology } from "./types";
 
 // The mock keeps module-level state, so every test gets a fresh copy.
 async function freshMock() {
@@ -143,5 +143,42 @@ describe("browser mock bridge", () => {
     expect(access).toMatchObject({ windows: true, user: "peervps", display: "vnc://127.0.0.1:5900" });
     expect(access.rdp).toMatch(/^127\.0\.0\.1:\d+$/);
     await expect(call(m, "open_guest_screen", { id: inst.id })).resolves.toBeNull();
+  });
+
+  it("adds, approves and removes peers and lists their offers", async () => {
+    const m = await freshMock();
+    const view = await call<PeerOverview>(m, "get_peers");
+    expect(view.invite).toBe(`${view.id}@192.168.1.10:7071`);
+    const added = await call<PeerInfo>(m, "add_peer", { address: "192.168.1.50" });
+    expect(added).toMatchObject({ address: "192.168.1.50:7071", trusted: true, status: "waitingForApproval" });
+    expect(await call<PeerInfo>(m, "add_peer", { address: "192.168.1.50" })).toMatchObject({ id: added.id });
+    await expect(call(m, "add_peer", { address: " " })).rejects.toMatchObject({ code: "invalid_argument" });
+    await expect(call(m, "add_peer", { address: "127.0.0.1:1" })).rejects.toMatchObject({ code: "peer_unavailable" });
+
+    expect((await call<Offer[]>(m, "list_offers", { query: {} })).filter((o) => o.id.includes("/"))).toHaveLength(1);
+    expect(await call<PeerInfo>(m, "approve_peer", { id: "pv-a17b0c55e9d24f13" })).toMatchObject({ trusted: true, status: "online" });
+    const remote = (await call<Offer[]>(m, "list_offers", { query: {} })).filter((o) => o.id.includes("/"));
+    expect(remote.map((o) => o.provider).sort()).toEqual(["pv-3f9c1a7e2b4d6c80", "pv-a17b0c55e9d24f13"]);
+    const [first] = remote;
+    if (!first) throw new Error("no peer offer");
+    const inst = await call<Instance>(m, "deploy_instance", { request: { offerId: first.id, spec } });
+    expect(inst.host).toBe(first.provider);
+
+    await call(m, "remove_peer", { id: added.id });
+    await expect(call(m, "remove_peer", { id: added.id })).rejects.toMatchObject({ code: "not_found" });
+    await expect(call(m, "approve_peer", { id: "pv-nope" })).rejects.toMatchObject({ code: "not_found" });
+    expect((await call<PeerOverview>(m, "get_peers")).peers.map((p) => p.id)).not.toContain(added.id);
+  });
+
+  it("turns internet reachability on and off", async () => {
+    const m = await freshMock();
+    expect((await call<PeerOverview>(m, "get_peers")).internet.state).toBe("off");
+    expect((await call<InternetStatus>(m, "set_internet", { enabled: true })).state).toBe("checking");
+    await vi.advanceTimersByTimeAsync(400);
+    const on = await call<PeerOverview>(m, "get_peers");
+    expect(on.internet.state).toBe("open");
+    expect(on.internetInvite).toBe(`${on.id}@203.0.113.7:7071`);
+    expect((await call<InternetStatus>(m, "set_internet", { enabled: false })).state).toBe("off");
+    expect((await call<PeerOverview>(m, "get_peers")).internetInvite).toBeNull();
   });
 });

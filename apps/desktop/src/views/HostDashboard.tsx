@@ -4,6 +4,7 @@ import { commands } from "../bridge/commands";
 import { useLive } from "../bridge/events";
 import type { HostAllocation, HostSnapshot } from "../bridge/types";
 import { InstallQemu, LocalImages } from "../components/LocalImages";
+import { Peers } from "../components/Peers";
 import { Button, Card, ErrorNote, Slider, Sparkline, Stat, Toggle } from "../components/ui";
 import { bytesPerSec, credits, mib, perHour } from "../lib/format";
 
@@ -134,6 +135,7 @@ export function HostDashboard() {
           </p>
         </Card>
         {snap.hypervisorNote && <InstallQemu reason={snap.hypervisorNote} />}
+        <Peers />
         <LocalImages />
       </div>
     </div>
