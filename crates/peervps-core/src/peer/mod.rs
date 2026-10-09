@@ -61,6 +61,8 @@ const WELCOME_CREDITS: i64 = 50;
 /// Unknown keys are remembered for approval up to this many, so a noisy
 /// network cannot grow the peer list without bound.
 const MAX_PENDING: usize = 32;
+/// Largest keystroke batch a renter may send to a guest's console in one request.
+const MAX_CONSOLE_INPUT: usize = 4096;
 
 /// This node's long-term key and the peer id derived from it.
 #[derive(Debug, Clone)]
@@ -764,6 +766,13 @@ impl Peers {
         }
     }
 
+    pub(crate) async fn console_input(&self, host: &str, id: &str, input: &str) -> Result<()> {
+        match self.call(host, &Request::ConsoleInput { id: id.to_owned(), input: input.to_owned() }).await? {
+            Response::Ok => Ok(()),
+            other => Err(unexpected(host, &other)),
+        }
+    }
+
     /// The host's login details with every endpoint moved to a local port that
     /// carries it here.
     pub(crate) async fn access(&self, host: &str, id: &str) -> Result<Option<GuestAccess>> {
@@ -941,6 +950,14 @@ impl Peers {
             Request::Terminate { id } => Response::Instance { instance: node.terminate(&account, &id).await? },
             Request::Console { id, max_bytes } => {
                 Response::Console { console: node.console(&account, &id, max_bytes.min(256 * 1024)).await? }
+            }
+            Request::ConsoleInput { id, input } => {
+                // A paste, not a file transfer: keystrokes arrive a few bytes at a time.
+                if input.len() > MAX_CONSOLE_INPUT {
+                    return Err(Error::Invalid(format!("console input over {MAX_CONSOLE_INPUT} bytes")));
+                }
+                node.console_input(&account, &id, &input).await?;
+                Response::Ok
             }
             Request::Access { id } => Response::Access { access: node.access(&account, &id).await? },
             Request::Forward { id, port } => {
