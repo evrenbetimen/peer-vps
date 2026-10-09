@@ -42,6 +42,9 @@ use async_trait::async_trait;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
@@ -243,6 +246,55 @@ struct Vm {
     seed: Option<AbortHandle>,
     /// Press a key at the installer's "Press any key to boot from CD" prompt on first start.
     boot_keys: bool,
+    serial: Arc<SerialInput>,
+}
+
+/// Keyboard input for the guest's serial port: a loopback connection to QEMU's
+/// socket chardev, opened on first use. QEMU logs everything the guest prints to
+/// `console.log` whether or not anyone is connected, so the bytes coming back on
+/// the socket are only drained, to keep the guest from blocking on a full buffer.
+struct SerialInput {
+    port: u16,
+    conn: Mutex<Option<(OwnedWriteHalf, AbortHandle)>>,
+}
+
+impl SerialInput {
+    fn new(port: u16) -> Self {
+        Self { port, conn: Mutex::new(None) }
+    }
+
+    async fn write(&self, data: &[u8]) -> Result<()> {
+        let mut conn = self.conn.lock().await;
+        // A connection QEMU dropped (e.g. across a restore) fails once; reconnect and retry.
+        for _ in 0..2 {
+            if conn.is_none() {
+                let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port))
+                    .await
+                    .map_err(|e| Error::Hypervisor(format!("serial console: {e}")))?;
+                let (mut rx, tx) = stream.into_split();
+                let drain = tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut rx, &mut tokio::io::sink()).await;
+                });
+                *conn = Some((tx, drain.abort_handle()));
+            }
+            if let Some((tx, drain)) = conn.as_mut() {
+                if tx.write_all(data).await.is_ok() {
+                    return Ok(());
+                }
+                drain.abort();
+                *conn = None;
+            }
+        }
+        Err(Error::Hypervisor("serial console connection lost".into()))
+    }
+}
+
+impl Drop for SerialInput {
+    fn drop(&mut self) {
+        if let Some((_, drain)) = self.conn.get_mut().take() {
+            drain.abort();
+        }
+    }
 }
 
 pub struct QemuHypervisor {
@@ -277,8 +329,10 @@ impl QemuHypervisor {
     }
 
     /// Launch QEMU for the VM in `dir` (paused, `-S`), pinned to `cores`, and wait for QMP.
-    async fn spawn(&self, dir: &Path, launch: &Launch, cores: &[u32], extra: Extra) -> Result<Vm> {
+    async fn spawn(&self, dir: &Path, launch: &Launch, cores: &[u32], mut extra: Extra) -> Result<Vm> {
         let qmp_port = free_port()?;
+        let serial_port = free_port()?;
+        extra.serial_port = Some(serial_port);
         let args = command_line(&self.cfg, dir, launch, qmp_port, &extra);
         let log = std::fs::File::create(dir.join("qemu.log"))?;
         let child = Command::new(&self.cfg.binary)
@@ -296,6 +350,7 @@ impl QemuHypervisor {
             launch: launch.clone(),
             seed: None,
             boot_keys: false,
+            serial: Arc::new(SerialInput::new(serial_port)),
         };
         if let Some(pid) = vm.child.id() {
             pin(pid, cores);
@@ -477,7 +532,12 @@ impl Hypervisor for QemuHypervisor {
                 }
                 launch.installer = Some(installer);
                 let mut vm = self
-                    .spawn(&dir, &launch, &placement.pinned_cores, Extra { seed_url: None, incoming: false })
+                    .spawn(
+                        &dir,
+                        &launch,
+                        &placement.pinned_cores,
+                        Extra { seed_url: None, incoming: false, serial_port: None },
+                    )
                     .await?;
                 vm.boot_keys = true;
                 return Ok(vm);
@@ -492,7 +552,12 @@ impl Hypervisor for QemuHypervisor {
             })
             .await?;
             match self
-                .spawn(&dir, &launch, &placement.pinned_cores, Extra { seed_url: Some(url), incoming: false })
+                .spawn(
+                    &dir,
+                    &launch,
+                    &placement.pinned_cores,
+                    Extra { seed_url: Some(url), incoming: false, serial_port: None },
+                )
                 .await
             {
                 Ok(mut vm) => {
@@ -592,7 +657,9 @@ impl Hypervisor for QemuHypervisor {
         ])
         .await?;
         launch.ssh_port = free_port()?;
-        let vm = self.spawn(&dir, &launch, &placement.pinned_cores, Extra { seed_url: None, incoming: true }).await?;
+        let vm = self
+            .spawn(&dir, &launch, &placement.pinned_cores, Extra { seed_url: None, incoming: true, serial_port: None })
+            .await?;
         self.vms.lock().await.insert(id, vm);
         let incoming = async {
             self.qmp(id, "migrate-incoming", Some(json!({ "uri": format!("file:{}", state.display()) }))).await?;
@@ -626,6 +693,11 @@ impl Hypervisor for QemuHypervisor {
         Ok(Some(String::from_utf8_lossy(&log[start..]).into_owned()))
     }
 
+    async fn console_write(&self, id: VmId, data: &[u8]) -> Result<()> {
+        let serial = self.with_vm(id, |vm| vm.serial.clone()).await?;
+        serial.write(data).await
+    }
+
     async fn access(&self, id: VmId) -> Result<Option<GuestAccess>> {
         let launch = self.with_vm(id, |vm| vm.launch.clone()).await?;
         let installer = launch.installer.as_ref();
@@ -647,6 +719,8 @@ impl Hypervisor for QemuHypervisor {
 struct Extra {
     seed_url: Option<String>,
     incoming: bool,
+    /// Loopback port for the serial console's input; `None` logs output only.
+    serial_port: Option<u16>,
 }
 
 /// QEMU's option parser splits on commas; a literal comma in a value is written `,,`.
@@ -679,11 +753,19 @@ fn command_line(cfg: &QemuConfig, dir: &Path, launch: &Launch, qmp_port: u16, ex
         launch.vcpus.to_string(),
         "-m".into(),
         format!("{}M", launch.mem_mib),
-        "-serial".into(),
-        format!("file:{}", esc(&dir.join("console.log"))),
         "-qmp".into(),
         format!("tcp:127.0.0.1:{qmp_port},server=on,wait=off"),
     ];
+    let console = esc(&dir.join("console.log"));
+    match extra.serial_port {
+        Some(port) => a.extend([
+            "-chardev".into(),
+            format!("socket,id=ser0,host=127.0.0.1,port={port},server=on,wait=off,logfile={console},logappend=on"),
+            "-serial".into(),
+            "chardev:ser0".into(),
+        ]),
+        None => a.extend(["-serial".into(), format!("file:{console}")]),
+    }
     let disk = esc(&dir.join("disk.qcow2"));
     if windows {
         // Windows has in-box NVMe drivers on x86 and Arm; it has none for virtio-blk.

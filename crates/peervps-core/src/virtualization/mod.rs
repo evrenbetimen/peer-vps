@@ -154,6 +154,10 @@ pub trait Hypervisor: Send + Sync + fmt::Debug {
     async fn console_tail(&self, _id: VmId, _max_bytes: usize) -> Result<Option<String>> {
         Ok(None)
     }
+    /// Type `data` into the guest's serial console, if the backend accepts input.
+    async fn console_write(&self, _id: VmId, _data: &[u8]) -> Result<()> {
+        Err(Error::Unsupported(format!("{} has a read-only console", self.name())))
+    }
     /// SSH endpoint for the guest, if the backend wires one up.
     async fn access(&self, _id: VmId) -> Result<Option<GuestAccess>> {
         Ok(None)

@@ -80,8 +80,13 @@ enum Cmd {
     },
     /// Show one instance, or all when no id is given.
     Status { id: Option<String> },
-    /// Tail of the instance's serial console.
-    Console { id: String },
+    /// Tail of the instance's serial console, or type into it with `--send`.
+    Console {
+        id: String,
+        /// Text to type, followed by Enter (e.g. a login name, a password or a command).
+        #[arg(long)]
+        send: Option<String>,
+    },
     /// How to reach an instance (QEMU backend): SSH, or for ISO installs the
     /// screen (VNC) and, for Windows, Remote Desktop.
     Access { id: String },
@@ -349,7 +354,10 @@ async fn main() -> Result<()> {
         Cmd::Scale { id, replicas } => {
             client.post(&format!("/v1/instances/{id}/scale"), json!({ "replicas": replicas })).await?
         }
-        Cmd::Console { id } => {
+        Cmd::Console { id, send: Some(text) } => {
+            client.post(&format!("/v1/instances/{id}/console"), json!({ "input": format!("{text}\r") })).await?
+        }
+        Cmd::Console { id, send: None } => {
             let out = client.get(&format!("/v1/instances/{id}/console"), &[]).await?;
             // Print the console verbatim rather than as a JSON string.
             match out.get("console").and_then(Value::as_str) {

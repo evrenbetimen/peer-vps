@@ -16,6 +16,7 @@
 //! | POST   | `/v1/instances/{id}/scale`     | `{"replicas":0|1}`                   |
 //! | DELETE | `/v1/instances/{id}`           | terminate                            |
 //! | GET    | `/v1/instances/{id}/console`   | tail of the guest serial console     |
+//! | POST   | `/v1/instances/{id}/console`   | `{"input":"…"}`: type into it         |
 //! | GET    | `/v1/instances/{id}/access`    | SSH endpoint, user and password      |
 //! | GET    | `/v1/account`                  | balance + ledger                     |
 //! | GET    | `/v1/peers`                    | this node's peer id, invite, peers   |
@@ -107,7 +108,7 @@ pub fn router(node: Node) -> Router {
         .route("/v1/instances", post(deploy).get(list_instances))
         .route("/v1/instances/{id}", get(get_instance).delete(terminate))
         .route("/v1/instances/{id}/scale", post(scale))
-        .route("/v1/instances/{id}/console", get(console))
+        .route("/v1/instances/{id}/console", get(console).post(console_input))
         .route("/v1/instances/{id}/access", get(access))
         .route("/v1/account", get(account))
         .route("/v1/peers", get(list_peers).post(add_peer))
@@ -191,6 +192,21 @@ struct Console {
 
 async fn console(State(node): State<Node>, Caller(who): Caller, Path(id): Path<String>) -> ApiResult<Console> {
     Ok(Json(Console { console: node.console(&who, &id, 64 * 1024).await? }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsoleInput {
+    input: String,
+}
+
+async fn console_input(
+    State(node): State<Node>,
+    Caller(who): Caller,
+    Path(id): Path<String>,
+    Json(req): Json<ConsoleInput>,
+) -> ApiResult<serde_json::Value> {
+    node.console_input(&who, &id, &req.input).await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(Debug, Serialize)]
