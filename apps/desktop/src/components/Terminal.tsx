@@ -101,7 +101,7 @@ function streamConsole(term: XTerm, instance: Instance): () => void {
   let warned = false;
   const input = term.onData((data) => {
     fastUntil = Date.now() + 3000;
-    // Keep keystrokes in order; one failure (e.g. a guest on another machine) is reported once.
+    // Keep keystrokes in order; one failure (e.g. a backend with a read-only console) is reported once.
     sending = sending
       .then(() => commands.sendConsole(instance.id, data))
       .catch((e: unknown) => {

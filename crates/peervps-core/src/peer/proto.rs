@@ -47,6 +47,11 @@ pub enum Request {
         id: String,
         max_bytes: usize,
     },
+    /// Keystrokes for the guest's serial console.
+    ConsoleInput {
+        id: String,
+        input: String,
+    },
     Access {
         id: String,
     },

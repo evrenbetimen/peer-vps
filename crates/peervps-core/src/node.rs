@@ -415,14 +415,14 @@ impl Node {
         self.provisioner.hypervisor().console_tail(inst.vm, max_bytes).await
     }
 
-    /// Type into the instance's serial console (a guest on this machine only).
+    /// Type into the instance's serial console, here or on the peer hosting it.
     pub async fn console_input(&self, renter: &str, id: &str, data: &str) -> Result<()> {
         let inst = self.instance(renter, id).await?;
         if inst.state != InstanceState::Running {
             return Err(Error::Invalid(format!("instance {id} is not running")));
         }
-        if self.remote(&inst)?.is_some() {
-            return Err(Error::Unsupported("typing into a guest on another machine is not supported yet".into()));
+        if let Some((peers, host)) = self.remote(&inst)? {
+            return peers.console_input(&host, id, data).await;
         }
         self.provisioner.hypervisor().console_write(inst.vm, data.as_bytes()).await
     }

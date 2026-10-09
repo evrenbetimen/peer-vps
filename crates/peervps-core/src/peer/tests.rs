@@ -16,6 +16,14 @@ use crate::virtualization::{Hypervisor, Placement, VmId, VmSnapshot, VmSpec};
 struct EchoGuests {
     inner: MockHypervisor,
     port: u16,
+    /// What renters typed, echoed after the login prompt like a real serial console.
+    typed: std::sync::Mutex<String>,
+}
+
+impl EchoGuests {
+    fn new(port: u16) -> Self {
+        Self { inner: MockHypervisor::default(), port, typed: Default::default() }
+    }
 }
 
 #[async_trait]
@@ -45,7 +53,14 @@ impl Hypervisor for EchoGuests {
         self.inner.destroy(id).await
     }
     async fn console_tail(&self, _id: VmId, _max: usize) -> crate::Result<Option<String>> {
-        Ok(Some("login: ".into()))
+        let typed = self.typed.lock().map(|t| t.clone()).unwrap_or_default();
+        Ok(Some(format!("login: {typed}")))
+    }
+    async fn console_write(&self, _id: VmId, data: &[u8]) -> crate::Result<()> {
+        if let Ok(mut typed) = self.typed.lock() {
+            typed.push_str(&String::from_utf8_lossy(data));
+        }
+        Ok(())
     }
     async fn access(&self, _id: VmId) -> crate::Result<Option<GuestAccess>> {
         Ok(Some(GuestAccess {
@@ -115,7 +130,7 @@ fn spec() -> VmSpec {
 #[tokio::test]
 async fn a_node_rents_a_vm_from_its_peer_after_approval() {
     let echo = echo_server().await;
-    let (host, _, host_peers) = node_with(Arc::new(EchoGuests { inner: MockHypervisor::default(), port: echo })).await;
+    let (host, _, host_peers) = node_with(Arc::new(EchoGuests::new(echo))).await;
     host.publish_offer(host_offer(&host)).await;
     let (renter_node, renter, peers) = node_with(Arc::new(MockHypervisor::default())).await;
     let host_addr = host_peers.overview().await.listen.expect("listening");
@@ -166,6 +181,11 @@ async fn a_node_rents_a_vm_from_its_peer_after_approval() {
     assert_eq!(again.ssh_port, access.ssh_port, "one local port per guest port");
 
     assert_eq!(renter_node.console(&renter, &inst.id, 1024).await.expect("console").as_deref(), Some("login: "));
+    renter_node.console_input(&renter, &inst.id, "peervps\r").await.expect("type on the host's guest");
+    assert_eq!(
+        renter_node.console(&renter, &inst.id, 1024).await.expect("console").as_deref(),
+        Some("login: peervps\r")
+    );
     let z = renter_node.scale(&renter, &inst.id, 0).await.expect("to zero");
     assert_eq!((z.state, z.host.as_deref()), (InstanceState::ScaledToZero, Some(host_peers.id())));
     assert_eq!(renter_node.scale(&renter, &inst.id, 1).await.expect("up").state, InstanceState::Running);
@@ -282,8 +302,7 @@ async fn two_machines_that_accept_no_connections_rent_through_a_relay() {
         (node, renter, peers)
     };
     let echo = echo_server().await;
-    let (host, _, host_peers) =
-        unreachable(Arc::new(EchoGuests { inner: MockHypervisor::default(), port: echo })).await;
+    let (host, _, host_peers) = unreachable(Arc::new(EchoGuests::new(echo))).await;
     host.publish_offer(host_offer(&host)).await;
     let (renter_node, renter, peers) = unreachable(Arc::new(MockHypervisor::default())).await;
     for p in [&host_peers, &peers] {
