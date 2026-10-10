@@ -2907,7 +2907,7 @@ dependencies = [
 
 [[package]]
 name = "peervps-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2921,7 +2921,7 @@ dependencies = [
 
 [[package]]
 name = "peervps-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2956,7 +2956,7 @@ dependencies = [
 
 [[package]]
 name = "peervps-desktop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "peervps-core",
  "reqwest 0.12.28",
