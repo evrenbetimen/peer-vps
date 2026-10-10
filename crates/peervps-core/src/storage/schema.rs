@@ -74,6 +74,17 @@ const MIGRATIONS: &[&str] = &[
         received_at  INTEGER NOT NULL
     );
     "#,
+    // v2
+    r#"
+    -- Running totals of credits moved with each peer (see billing::peering).
+    CREATE TABLE peer_payments (
+        peer          TEXT PRIMARY KEY,
+        sent          INTEGER NOT NULL DEFAULT 0,
+        received      INTEGER NOT NULL DEFAULT 0,
+        refunded_out  INTEGER NOT NULL DEFAULT 0,
+        refunded_in   INTEGER NOT NULL DEFAULT 0
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

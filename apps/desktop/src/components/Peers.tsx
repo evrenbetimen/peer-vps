@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { commands } from "../bridge/commands";
 import type { InternetStatus, PeerInfo, PeerOverview, PeerStatus, RelayStatus } from "../bridge/types";
 import { Button, Card, ErrorNote, Toggle } from "./ui";
-import { cx } from "../lib/format";
+import { credits, cx } from "../lib/format";
 
 const STATUS: Record<PeerStatus, { label: string; tone: string }> = {
   online: { label: "online", tone: "text-emerald-400" },
@@ -261,6 +261,11 @@ function PeerRow({ peer, busy, onRemove }: { peer: PeerInfo; busy: boolean; onRe
           {peer.address && ` · ${peer.address}`}
           {peer.status === "online" && ` · ${peer.offers.length} offer${peer.offers.length === 1 ? "" : "s"} in the Console`}
         </div>
+        {(peer.flows.paid > 0 || peer.flows.earned > 0) && (
+          <div className="text-xs text-slate-500">
+            {[peer.flows.paid > 0 && `you paid ${credits(peer.flows.paid)} cr`, peer.flows.earned > 0 && `earned ${credits(peer.flows.earned)} cr from it`].filter(Boolean).join(" · ")}
+          </div>
+        )}
         {peer.error && peer.status === "unreachable" && <div className="truncate text-xs text-rose-400/80">{peer.error}</div>}
       </div>
       <Button variant="ghost" onClick={onRemove} disabled={busy}>

@@ -5,6 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
 use crate::api::market::OfferQuery;
+use crate::billing::MICROS_PER_CREDIT;
 use crate::node::InstanceState;
 use crate::storage::Store;
 use crate::virtualization::accel::AcceleratorKind;
@@ -155,6 +156,7 @@ async fn a_node_rents_a_vm_from_its_peer_after_approval() {
     let offer = offers.iter().find(|o| o.id == remote_id).expect("host offer listed");
     assert_eq!(offer.provider, host_peers.id());
 
+    let before = renter_node.ledger.balance(&renter).await.expect("renter balance");
     let inst = renter_node
         .deploy(&renter, DeployRequest { offer_id: remote_id.clone(), spec: spec() })
         .await
@@ -165,7 +167,16 @@ async fn a_node_rents_a_vm_from_its_peer_after_approval() {
     assert!(renter_node.provisioner.list().await.is_empty(), "not on the renter");
     let account = format!("peer-{}", peers.id());
     assert_eq!(host.instances(&account).await.len(), 1);
-    assert_eq!(host.ledger.balance(&account).await.expect("peer account"), WELCOME_CREDITS * MICROS_PER_CREDIT);
+    // The renter prepaid ten minutes at the offer's 600 µcredits a second out of its own wallet.
+    let prepaid = 600 * PREPAID_SECS;
+    assert_eq!(host.ledger.balance(&account).await.expect("peer account"), prepaid);
+    assert_eq!(renter_node.ledger.balance(&renter).await.expect("renter"), before - prepaid);
+    // The host's meter bills it from there; its owner earns it, less the platform fee.
+    let earnings = host.ledger.balance(&host.config.node_id).await.expect("earnings");
+    host.meter.tick(now_secs() + 100).await.expect("bill 100 s");
+    let used = prepaid - host.ledger.balance(&account).await.expect("peer account");
+    assert!(used >= 100 * 600, "{used}");
+    assert!(host.ledger.balance(&host.config.node_id).await.expect("earnings") > earnings);
 
     // SSH reaches the guest through a local port.
     let access = renter_node.access(&renter, &inst.id).await.expect("access").expect("endpoint");
@@ -192,6 +203,14 @@ async fn a_node_rents_a_vm_from_its_peer_after_approval() {
     let gone = renter_node.terminate(&renter, &inst.id).await.expect("terminate");
     assert_eq!(gone.state, InstanceState::Terminated);
     assert_eq!(host.instances(&account).await[0].state, InstanceState::Terminated);
+    // What was prepaid and not used came back; both sides agree on what was spent.
+    assert_eq!(host.ledger.balance(&account).await.expect("peer account"), 0);
+    let (host_flows, renter_flows) = (host.ledger.peer_flows().await, renter_node.ledger.peer_flows().await);
+    let [(who, host_view)] = &host_flows.expect("flows")[..] else { panic!("one peer") };
+    let [(_, renter_view)] = &renter_flows.expect("flows")[..] else { panic!("one peer") };
+    assert_eq!((who.as_str(), host_view.earned), (peers.id(), renter_view.paid));
+    assert!(host_view.earned >= used, "{host_view:?}");
+    assert_eq!(renter_node.ledger.balance(&renter).await.expect("renter"), before - renter_view.paid);
     assert!(TcpStream::connect(("127.0.0.1", access.ssh_port)).await.is_err(), "local port closed");
 }
 
@@ -216,6 +235,44 @@ async fn keys_are_checked_and_peers_only_rent_local_offers() {
     let demo = peers.call(host_peers.id(), &Request::Deploy { offer_id: "fra-cpu-1".into(), spec: spec() }).await;
     assert!(matches!(demo, Err(Error::NotFound(_))), "{demo:?}");
     assert!(host.provisioner.list().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_renter_that_cannot_pay_is_stopped_on_the_host() {
+    let (host, _, host_peers) = node_with(Arc::new(MockHypervisor::default())).await;
+    host.publish_offer(host_offer(&host)).await;
+    let (renter_node, renter, peers) = node_with(Arc::new(MockHypervisor::default())).await;
+    peers.add(&host_peers.overview().await.listen.expect("listening")).await.expect("add");
+    host_peers.approve(peers.id()).await.expect("approve");
+    peers.refresh().await;
+
+    // Leave the renter with 70 seconds' worth at 600 µcredits a second.
+    let wallet = renter_node.ledger.balance(&renter).await.expect("balance");
+    renter_node.ledger.transfer(&renter, "system:treasury", wallet - 70 * 600, "test", None).await.expect("drain");
+    let offer_id = format!("{}/this-machine", host_peers.id());
+    let inst = renter_node.deploy(&renter, DeployRequest { offer_id, spec: spec() }).await.expect("deploy");
+    assert_eq!(renter_node.ledger.balance(&renter).await.expect("balance"), 0, "all of it prepaid");
+
+    // The prepaid seconds run out on the host, which stops the VM instead of running it unpaid.
+    let settled = host.meter.tick(now_secs() + 100).await.expect("tick");
+    let [s] = &settled[..] else { panic!("{settled:?}") };
+    assert!(s.exhausted && s.seconds == 70, "{s:?}");
+    host.suspend_exhausted(&s.instance).await.expect("suspend");
+    let account = format!("peer-{}", peers.id());
+    assert_eq!(host.instances(&account).await[0].state, InstanceState::ScaledToZero);
+    assert!(host.provisioner.list().await.iter().all(|v| v.state != crate::virtualization::VmState::Running));
+
+    // The renter sees it stopped, and nothing more is owed.
+    peers.keep_funded().await;
+    assert_eq!(renter_node.instance(&renter, &inst.id).await.expect("ours").state, InstanceState::ScaledToZero);
+    let resumed = renter_node.scale(&renter, &inst.id, 1).await;
+    assert!(matches!(resumed, Err(Error::InsufficientFunds { .. })), "{resumed:?}");
+
+    // Topping up lets it start again.
+    renter_node.ledger.top_up(&renter, MICROS_PER_CREDIT, "pi_again").await.expect("top up");
+    let up = renter_node.scale(&renter, &inst.id, 1).await.expect("resume");
+    assert_eq!(up.state, InstanceState::Running);
+    assert_eq!(host.ledger.balance(&account).await.expect("prepaid"), MICROS_PER_CREDIT.min(600 * PREPAID_SECS));
 }
 
 #[tokio::test]

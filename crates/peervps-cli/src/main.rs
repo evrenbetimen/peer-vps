@@ -424,9 +424,13 @@ async fn serve(listen: SocketAddr, db: Option<PathBuf>, hv: HypervisorArgs, peer
     }
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     tokio::spawn(node.meter.clone().run(tx));
+    let n = node.clone();
     tokio::spawn(async move {
         while let Some(billing_id) = rx.recv().await {
-            tracing::warn!(%billing_id, "renter out of credits; instance suspended");
+            tracing::warn!(%billing_id, "renter out of credits; instance scaled to zero");
+            if let Err(e) = n.suspend_exhausted(&billing_id).await {
+                tracing::error!(%billing_id, error = %e, "could not stop an unpaid instance");
+            }
         }
     });
     tokio::select! {

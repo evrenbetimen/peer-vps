@@ -122,6 +122,10 @@ describe("App", () => {
     await vi.waitFor(() => expect(deploy).toBeEnabled());
     await user.click(deploy);
     expect(await screen.findByText(/on pv-3f9c1a7e2b4d6c80/)).toBeInTheDocument();
+
+    // Ten minutes at 600 µcredits a second were prepaid to the host.
+    await user.click(screen.getByRole("button", { name: /^Host/ }));
+    expect(await within(await screen.findByTestId("peer-pv-3f9c1a7e2b4d6c80")).findByText("you paid 0.36 cr · earned 3.00 cr from it")).toBeInTheDocument();
   });
 
   it("adds a machine found on the network and opens a port for other networks", async () => {

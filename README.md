@@ -150,8 +150,14 @@ open to it, and gets a third invite, `pv-…@relay://host:7073`, that works from
 joins the two connections: the machines run their own end-to-end Noise handshake through it, so it sees
 ciphertext and cannot pose as either of them (it does see who connects to whom, and how much).
 
-The image must be installed on the host (pull or import it there). Money does not cross machines yet: the
-host gives each new peer a one-time 50-credit welcome balance and bills it per second in its own ledger.
+The image must be installed on the host (pull or import it there). Renting is paid from the renter's
+wallet: its node keeps ten minutes of its rentals on each host paid ahead (topping up when five are left),
+the host bills that balance per second like any renter, and its owner earns it less the platform fee. When
+nothing of yours runs on a host any more, what is left comes back. If the prepaid balance runs out, the host
+scales the VM to zero instead of running it unpaid. Only running totals cross the wire, so a lost or
+repeated message is caught up or ignored by the next one. These are credits between peers you approved,
+carried over the authenticated channel; nobody else clears them. The Peers card shows what you paid each
+peer and earned from it.
 The REST API mirrors all of it: `GET/POST /v1/peers`, `POST /v1/peers/{id}/approve`,
 `DELETE /v1/peers/{id}`, `PUT /v1/peers/internet`, `PUT /v1/peers/relay`.
 
