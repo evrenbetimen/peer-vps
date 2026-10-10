@@ -144,6 +144,57 @@ fn windows_installs_get_in_box_devices_a_screen_and_answers() {
 }
 
 #[test]
+fn only_our_own_qemus_count_as_orphans() {
+    let none = Extra { seed_url: None, incoming: false, serial_port: None };
+    let ours = cfg(Path::new("/data/peervps"));
+    let args = command_line(&ours, &ours.run_dir.join("vm-1"), &launch(), 4444, &none);
+    let qemu = std::ffi::OsStr::new("qemu-system-x86_64");
+    assert!(is_orphan(qemu, &args, &ours.run_dir));
+    // Another install's VM, or another program reading our files, is left alone.
+    let other = cfg(Path::new("/elsewhere"));
+    assert!(!is_orphan(
+        qemu,
+        &command_line(&other, &other.run_dir.join("vm-1"), &launch(), 4444, &none),
+        &ours.run_dir
+    ));
+    assert!(!is_orphan(std::ffi::OsStr::new("tail"), &args, &ours.run_dir));
+}
+
+/// A stand-in "QEMU" (a shell renamed so the OS reports it as qemu-system)
+/// whose command line names a VM directory, as a crashed app would leave it.
+#[cfg(unix)]
+#[test]
+fn a_fresh_start_stops_qemus_left_in_its_run_dir() {
+    let root = std::env::temp_dir().join(format!("pvqo-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&root).expect("tmp");
+    let fake = root.join("qemu-system-x86_64");
+    std::fs::copy("/bin/sh", &fake).expect("copy sh");
+    let run_dir = root.join("run");
+    let spawn = |dir: &Path| {
+        std::process::Command::new(&fake)
+            .args(["-c", "sleep 60; true"])
+            .arg(dir.join("vm-1").join("console.log"))
+            .spawn()
+            .expect("spawn")
+    };
+    let mut ours = spawn(&run_dir);
+    let mut other = spawn(&root.join("elsewhere"));
+    std::thread::sleep(Duration::from_millis(200));
+
+    reap_orphans(&run_dir);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while ours.try_wait().expect("wait").is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(ours.try_wait().expect("wait").is_some(), "our leftover QEMU was stopped");
+    assert!(other.try_wait().expect("wait").is_none(), "another install's QEMU keeps running");
+    let _ = other.kill();
+    let _ = other.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn snapshot_framing_round_trips_and_rejects_garbage() {
     let packed = pack_snapshot(&launch(), b"state", b"disk-bytes").expect("pack");
     let (l, state, disk) = unpack_snapshot(&packed).expect("unpack");

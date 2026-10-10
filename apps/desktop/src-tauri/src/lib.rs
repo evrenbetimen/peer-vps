@@ -152,9 +152,18 @@ pub fn run() {
             images::pull_image,
             images::import_image,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
             eprintln!("error while running PeerVPS: {e}");
             std::process::exit(1);
+        })
+        .run(|app, event| {
+            // The process exits right after this without running destructors,
+            // so stop the VMs (and their billing) now or they outlive the app.
+            if let tauri::RunEvent::Exit = event
+                && let Some(state) = app.try_state::<AppState>()
+            {
+                tauri::async_runtime::block_on(state.node.shutdown(std::time::Duration::from_secs(5)));
+            }
         });
 }
