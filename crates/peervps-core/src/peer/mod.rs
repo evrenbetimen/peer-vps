@@ -18,8 +18,9 @@
 //! carried back through the channel to ports on the renter's 127.0.0.1, so
 //! nothing on the host listens beyond loopback.
 //!
-//! Money does not cross nodes yet: a host gives each new peer account a
-//! one-time welcome credit and bills it per second in its own ledger.
+//! A renter prepays its hosts out of its own wallet (see
+//! [`crate::billing::peering`]); a host bills a peer's `peer-<id>` account per
+//! second like any renter and stops its VMs when that runs out.
 
 pub mod channel;
 pub mod discovery;
@@ -40,9 +41,9 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::api::market::Offer;
-use crate::billing::{AccountKind, MICROS_PER_CREDIT};
+use crate::billing::{AccountKind, PeerFlows};
 use crate::network::noise::{StaticKeypair, generate_keypair};
-use crate::node::{DeployRequest, Instance, Node};
+use crate::node::{DeployRequest, Instance, InstanceState, Node};
 use crate::storage::now_secs;
 use crate::virtualization::GuestAccess;
 use crate::{Error, Result};
@@ -57,7 +58,10 @@ pub const DEFAULT_PORT: u16 = 7071;
 const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Deploying can take a while on the host (copying a disk, booting QEMU).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
-const WELCOME_CREDITS: i64 = 50;
+/// A renter keeps its rentals on each host paid this many seconds ahead...
+const PREPAID_SECS: i64 = 600;
+/// ...and tops up once less than this is left.
+const REFILL_SECS: i64 = 300;
 /// Unknown keys are remembered for approval up to this many, so a noisy
 /// network cannot grow the peer list without bound.
 const MAX_PENDING: usize = 32;
@@ -151,6 +155,9 @@ pub struct PeerInfo {
     pub offers: Vec<Offer>,
     pub last_seen: Option<i64>,
     pub error: Option<String>,
+    /// Credits we paid it and it paid us, net of refunds (filled in by [`Peers::overview`]).
+    #[serde(default)]
+    pub flows: PeerFlows,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -247,6 +254,7 @@ impl Peers {
                         offers: Vec::new(),
                         last_seen: None,
                         error: None,
+                        flows: PeerFlows::default(),
                     },
                 );
             }
@@ -470,6 +478,7 @@ impl Peers {
         tokio::spawn(async move {
             loop {
                 me.refresh().await;
+                me.keep_funded().await;
                 tokio::time::sleep(every).await;
             }
         })
@@ -478,6 +487,11 @@ impl Peers {
     pub async fn overview(&self) -> PeerOverview {
         let mut peers: Vec<PeerInfo> = self.inner.peers.read().await.values().cloned().collect();
         peers.sort_by(|a, b| a.id.cmp(&b.id));
+        let flows: HashMap<String, PeerFlows> =
+            self.inner.node.ledger.peer_flows().await.unwrap_or_default().into_iter().collect();
+        for p in &mut peers {
+            p.flows = flows.get(&p.id).copied().unwrap_or_default();
+        }
         let mut nearby = self.inner.nearby.list().await;
         nearby.retain(|n| !peers.iter().any(|p| p.id == n.id));
         let internet = self.internet();
@@ -561,6 +575,7 @@ impl Peers {
                 offers: Vec::new(),
                 last_seen: None,
                 error: None,
+                flows: PeerFlows::default(),
             });
             entry.address = Some(address.clone());
             entry.trusted = true;
@@ -793,6 +808,56 @@ impl Peers {
         Ok(Some(a))
     }
 
+    /// Tell `host` the total we have paid it; returns our balance there.
+    async fn pay(&self, host: &str, total: i64) -> Result<i64> {
+        match self.call(host, &Request::Pay { total }).await? {
+            Response::Paid { balance } => Ok(balance),
+            other => Err(unexpected(host, &other)),
+        }
+    }
+
+    /// Keep rentals costing `rate` µcredits a second on `host` paid
+    /// [`PREPAID_SECS`] ahead, out of `account`.
+    pub(crate) async fn fund(&self, host: &str, account: &str, rate: i64) -> Result<()> {
+        let ledger = &self.inner.node.ledger;
+        // Repeating the total also delivers a payment whose answer was lost.
+        let balance = self.pay(host, ledger.paid_to(host).await?).await?;
+        if balance >= rate * REFILL_SECS {
+            return Ok(());
+        }
+        let want = rate * PREPAID_SECS - balance;
+        let available = ledger.balance(account).await?;
+        if available <= 0 {
+            return if balance > 0 { Ok(()) } else { Err(Error::InsufficientFunds { needed: want, available }) };
+        }
+        let total = ledger.pay_peer(account, host, want.min(available)).await?;
+        self.pay(host, total).await?;
+        Ok(())
+    }
+
+    /// Take back into `account` what is left of our balance on `host` (nothing may run there).
+    pub(crate) async fn settle(&self, host: &str, account: &str) -> Result<i64> {
+        match self.call(host, &Request::Withdraw).await? {
+            Response::Refunded { total } => self.inner.node.ledger.refunded_by_peer(host, account, total).await,
+            other => Err(unexpected(host, &other)),
+        }
+    }
+
+    /// Keep every running rental paid ahead, after picking up what the hosts changed.
+    async fn keep_funded(&self) {
+        let mut due: HashMap<String, (String, i64)> = HashMap::new();
+        for inst in self.inner.node.sync_remote().await {
+            let (Some(host), InstanceState::Running) = (inst.host, inst.state) else { continue };
+            // One balance per host covers all its rentals; the first renter's account pays.
+            due.entry(host).or_insert((inst.renter, 0)).1 += inst.price_per_sec;
+        }
+        for (host, (account, rate)) in due {
+            if let Err(e) = self.fund(&host, &account, rate).await {
+                tracing::warn!(%host, error = %e, "could not prepay rentals");
+            }
+        }
+    }
+
     /// A local port whose connections are carried to `port` of a guest on `host`.
     async fn forward(&self, host: &str, id: &str, port: GuestPort) -> Result<u16> {
         let mut forwards = self.inner.forwards.lock().await;
@@ -911,6 +976,7 @@ impl Peers {
                             offers: Vec::new(),
                             last_seen: Some(now_secs()),
                             error: None,
+                            flows: PeerFlows::default(),
                         },
                     );
                     changed = true;
@@ -964,17 +1030,25 @@ impl Peers {
                 self.guest_port(peer, &id, port).await?;
                 Response::Ok
             }
+            Request::Pay { total } => {
+                if total < 0 {
+                    return Err(Error::Invalid("a payment total cannot be negative".into()));
+                }
+                Response::Paid { balance: node.ledger.receive_from_peer(peer, &account, total).await? }
+            }
+            Request::Withdraw => {
+                if node.instances(&account).await.iter().any(|i| i.state == InstanceState::Running) {
+                    return Err(Error::Invalid("instances are still running here".into()));
+                }
+                Response::Refunded { total: node.ledger.refund_peer(peer, &account).await? }
+            }
         })
     }
 
-    /// The ledger account a peer rents under, opened with a welcome credit.
+    /// The ledger account a peer rents under; it holds what the peer prepaid.
     async fn account_for(&self, peer: &str) -> Result<String> {
         let account = format!("peer-{peer}");
-        let ledger = &self.inner.node.ledger;
-        if ledger.balance(&account).await.is_err() {
-            ledger.open_account(&account, AccountKind::Renter).await?;
-            ledger.top_up(&account, WELCOME_CREDITS * MICROS_PER_CREDIT, &format!("peer-welcome-{peer}")).await?;
-        }
+        self.inner.node.ledger.open_account(&account, AccountKind::Renter).await?;
         Ok(account)
     }
 

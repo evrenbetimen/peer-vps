@@ -53,7 +53,7 @@ impl Ledger {
     pub fn new(store: Store, events: EventBus) -> Result<Self> {
         let ledger = Self { store, events };
         ledger.store.with(|c| {
-            for id in [TREASURY, GATEWAY] {
+            for id in [TREASURY, GATEWAY, super::peering::PEERS] {
                 ensure_account(c, id, AccountKind::System)?;
             }
             Ok(())

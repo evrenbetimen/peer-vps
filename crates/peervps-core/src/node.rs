@@ -244,12 +244,85 @@ impl Node {
 
     async fn deploy_remote(&self, peers: &Peers, renter: &str, host: &str, req: DeployRequest) -> Result<Instance> {
         let offer_id = req.offer_id.clone();
+        let price = peers
+            .remote_offers()
+            .await
+            .into_iter()
+            .find(|o| o.id == offer_id)
+            .map(|o| o.price_per_sec)
+            .ok_or_else(|| Error::NotFound(format!("offer {offer_id}")))?;
+        let needed = price * self.config.min_runway_secs;
+        let available = self.ledger.balance(renter).await?;
+        if available < needed {
+            return Err(Error::InsufficientFunds { needed, available });
+        }
+        // The host bills from what we prepaid, so pay before asking it to start.
+        peers.fund(host, renter, self.host_rate(host).await + price).await?;
         let (_, remote_offer) = offer_id.split_once('/').unwrap_or((host, &offer_id));
-        let theirs = peers.deploy(host, remote_offer, req).await?;
+        let theirs = match peers.deploy(host, remote_offer, req).await {
+            Ok(theirs) => theirs,
+            Err(e) => {
+                self.settle_host(peers, host, renter).await;
+                return Err(e);
+            }
+        };
         let inst =
             Instance { renter: renter.to_owned(), offer_id, host: Some(host.to_owned()), billing_segment: 0, ..theirs };
         self.instances.lock().await.insert(inst.id.clone(), inst.clone());
         Ok(inst)
+    }
+
+    /// What our running rentals on `host` cost per second.
+    async fn host_rate(&self, host: &str) -> i64 {
+        self.instances
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.host.as_deref() == Some(host) && i.state == InstanceState::Running)
+            .map(|i| i.price_per_sec)
+            .sum()
+    }
+
+    /// Once nothing of ours runs on `host`, take back what we prepaid there.
+    async fn settle_host(&self, peers: &Peers, host: &str, renter: &str) {
+        if self.host_rate(host).await > 0 {
+            return;
+        }
+        if let Err(e) = peers.settle(host, renter).await {
+            tracing::warn!(%host, error = %e, "could not take back prepaid credits");
+        }
+    }
+
+    /// Our rentals on other nodes, refreshed from their hosts where reachable.
+    pub(crate) async fn sync_remote(&self) -> Vec<Instance> {
+        let ours: Vec<Instance> = self
+            .instances
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.host.is_some() && i.state != InstanceState::Terminated)
+            .cloned()
+            .collect();
+        let Some(peers) = self.peers() else { return ours };
+        let mut out = Vec::with_capacity(ours.len());
+        for inst in ours {
+            let host = inst.host.clone().unwrap_or_default();
+            out.push(match peers.instance_call(&host, PeerRequest::Get { id: inst.id.clone() }).await {
+                Ok(theirs) => self.keep_remote(&inst, theirs).await,
+                Err(_) => inst,
+            });
+        }
+        out
+    }
+
+    /// The meter ran out of a renter's credits: stop the VM so it does not run unpaid.
+    pub async fn suspend_exhausted(&self, billing_id: &str) -> Result<()> {
+        let inst = self.instances.lock().await.values().find(|i| i.billing_id() == billing_id).cloned();
+        let Some(inst) = inst.filter(|i| i.state == InstanceState::Running) else { return Ok(()) };
+        self.provisioner.hibernate(inst.vm).await?;
+        let id = inst.id.clone();
+        self.instances.lock().await.insert(id, Instance { state: InstanceState::ScaledToZero, ..inst });
+        Ok(())
     }
 
     /// Store the host's view of a remote instance under our renter and offer id.
@@ -348,8 +421,16 @@ impl Node {
     pub async fn scale(&self, renter: &str, id: &str, replicas: u32) -> Result<Instance> {
         let inst = self.instance(renter, id).await?;
         if let Some((peers, host)) = self.remote(&inst)? {
+            let resuming = replicas == 1 && inst.state == InstanceState::ScaledToZero;
+            if resuming {
+                peers.fund(&host, renter, self.host_rate(&host).await + inst.price_per_sec).await?;
+            }
             let theirs = peers.instance_call(&host, PeerRequest::Scale { id: id.to_owned(), replicas }).await?;
-            return Ok(self.keep_remote(&inst, theirs).await);
+            let updated = self.keep_remote(&inst, theirs).await;
+            if updated.state != InstanceState::Running {
+                self.settle_host(peers, &host, renter).await;
+            }
+            return Ok(updated);
         }
         let provider = self
             .offers
@@ -390,7 +471,9 @@ impl Node {
                 Err(e) => return Err(e),
             };
             peers.stop_forwards(id).await;
-            return Ok(self.keep_remote(&inst, theirs).await);
+            let done = self.keep_remote(&inst, theirs).await;
+            self.settle_host(peers, &host, renter).await;
+            return Ok(done);
         }
         if inst.state == InstanceState::Running {
             self.meter.stop(&inst.billing_id(), now_secs()).await?;

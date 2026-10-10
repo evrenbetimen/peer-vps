@@ -31,8 +31,8 @@ const ME = "pv-5c0ffee15ea1ab1e";
 /** A peer's own "this-machine" offer, as it lists it to us. */
 const remoteOffer = (): Offer => ({ id: "this-machine", provider: "local", region: "local", vcpus: 4, memMib: 16384, diskGib: 200, accelerator: "none", acceleratorModel: null, vramMib: 0, pricePerSec: 600, slaPct: 100, confidential: false, collateralLocked: 150 * C });
 const peers: PeerInfo[] = [
-  { id: "pv-3f9c1a7e2b4d6c80", publicKey: "3f9c1a7e2b4d6c80".padEnd(64, "0"), address: "192.168.1.20:7071", trusted: true, status: "online", offers: [remoteOffer()], lastSeen: Math.floor(Date.now() / 1000), error: null },
-  { id: "pv-a17b0c55e9d24f13", publicKey: "a17b0c55e9d24f13".padEnd(64, "0"), address: "192.168.1.31:7071", trusted: false, status: "pending", offers: [], lastSeen: Math.floor(Date.now() / 1000), error: null },
+  { id: "pv-3f9c1a7e2b4d6c80", publicKey: "3f9c1a7e2b4d6c80".padEnd(64, "0"), address: "192.168.1.20:7071", trusted: true, status: "online", offers: [remoteOffer()], lastSeen: Math.floor(Date.now() / 1000), error: null, flows: { paid: 0, earned: 3 * C } },
+  { id: "pv-a17b0c55e9d24f13", publicKey: "a17b0c55e9d24f13".padEnd(64, "0"), address: "192.168.1.31:7071", trusted: false, status: "pending", offers: [], lastSeen: Math.floor(Date.now() / 1000), error: null, flows: { paid: 0, earned: 0 } },
 ];
 let internet: InternetStatus = { state: "off", address: null, detail: null };
 let relay: RelayStatus = { state: "off", address: null, detail: null };
@@ -150,6 +150,15 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
           createdAt: Math.floor(Date.now() / 1000),
           ...(offerId.includes("/") ? { host: offer.provider } : {}),
         };
+        const host = peers.find((p) => p.id === inst.host);
+        if (host) {
+          // Like the node: prepay ten minutes on the host out of the wallet.
+          const prepay = Math.min(offer.pricePerSec * 600, wallet.balance);
+          if (prepay <= 0) throw { code: "insufficient_funds", message: "not enough credits to prepay the host" };
+          wallet.balance -= prepay;
+          host.flows.paid += prepay;
+          wallet.history.unshift({ id: Date.now(), account: "demo-agent", delta: -prepay, balanceAfter: wallet.balance, kind: "peer_payment", reference: host.id, at: Math.floor(Date.now() / 1000) });
+        }
         instances.unshift(inst);
         return inst;
       }
@@ -252,7 +261,7 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         const id = want ?? `pv-${Array.from(addr).reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7).toString(16).padStart(16, "0").slice(0, 16)}`;
         let peer = peers.find((p) => p.id === id);
         if (!peer) {
-          peer = { id, publicKey: id.slice(3).padEnd(64, "0"), address: addr.includes(":") ? addr : `${addr}:7071`, trusted: true, status: "waitingForApproval", offers: [], lastSeen: Math.floor(Date.now() / 1000), error: `waiting for the owner of ${id} to approve ${ME}` };
+          peer = { id, publicKey: id.slice(3).padEnd(64, "0"), address: addr.includes(":") ? addr : `${addr}:7071`, trusted: true, status: "waitingForApproval", offers: [], lastSeen: Math.floor(Date.now() / 1000), error: `waiting for the owner of ${id} to approve ${ME}`, flows: { paid: 0, earned: 0 } };
           peers.push(peer);
         }
         return peer;

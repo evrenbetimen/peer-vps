@@ -245,6 +245,13 @@ export interface PeerInfo {
   offers: Offer[];
   lastSeen: number | null;
   error: string | null;
+  /** Credits we paid this peer and it paid us, net of refunds. */
+  flows: PeerFlows;
+}
+
+export interface PeerFlows {
+  paid: Micros;
+  earned: Micros;
 }
 
 export type InternetState = "off" | "checking" | "open" | "noGateway" | "carrierNat" | "failed";

@@ -100,12 +100,15 @@ pub fn run() {
             tauri::async_runtime::spawn(demo.clone().run());
             tauri::async_runtime::spawn(metrics::run(node.clone(), provider.clone()));
             tauri::async_runtime::spawn(pump::run(app.handle().clone(), node.events.subscribe()));
-            let meter = node.meter.clone();
+            let n = node.clone();
             tauri::async_runtime::spawn(async move {
                 let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-                tokio::spawn(meter.run(tx));
+                tokio::spawn(n.meter.clone().run(tx));
                 while let Some(id) = rx.recv().await {
-                    tracing::warn!(%id, "renter out of credits; billing suspended");
+                    tracing::warn!(%id, "renter out of credits; instance scaled to zero");
+                    if let Err(e) = n.suspend_exhausted(&id).await {
+                        tracing::error!(%id, error = %e, "could not stop an unpaid instance");
+                    }
                 }
             });
 

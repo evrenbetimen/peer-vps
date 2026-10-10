@@ -55,6 +55,13 @@ pub enum Request {
     Access {
         id: String,
     },
+    /// We have paid the host `total` µcredits in all (a running total, so
+    /// repeating it is harmless); answered with our balance there.
+    Pay {
+        total: i64,
+    },
+    /// Return what is left of our balance; answered with the running total refunded.
+    Withdraw,
     /// After an `Ok` answer the channel carries this guest port's bytes.
     Forward {
         id: String,
@@ -69,6 +76,8 @@ pub enum Response {
     Instance { instance: Instance },
     Console { console: Option<String> },
     Access { access: Option<GuestAccess> },
+    Paid { balance: i64 },
+    Refunded { total: i64 },
     Ok,
     Error { code: String, message: String },
 }
