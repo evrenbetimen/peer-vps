@@ -411,6 +411,10 @@ async fn main() -> Result<()> {
 async fn serve(listen: SocketAddr, db: Option<PathBuf>, hv: HypervisorArgs, peer: PeerArgs) -> Result<()> {
     let hypervisor = hv.build()?;
     eprintln!("hypervisor: {}", hypervisor.name());
+    match hypervisor.reap_orphans().await? {
+        0 => {}
+        n => eprintln!("stopped {n} guest(s) an earlier run left behind"),
+    }
     let store = match db {
         Some(path) => Store::open(&path).with_context(|| format!("open {}", path.display()))?,
         None => Store::in_memory()?,
@@ -434,9 +438,11 @@ async fn serve(listen: SocketAddr, db: Option<PathBuf>, hv: HypervisorArgs, peer
         }
     });
     tokio::select! {
-        r = peervps_core::api::serve(node, listen) => r?,
+        r = peervps_core::api::serve(node.clone(), listen) => r?,
         _ = tokio::signal::ctrl_c() => eprintln!("shutting down"),
     }
+    // Guests run as separate processes; stop them rather than leave them behind.
+    node.shutdown().await;
     Ok(())
 }
 

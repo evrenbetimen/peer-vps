@@ -313,3 +313,43 @@ async fn windows_iso_install_boots_with_a_locked_screen() {
     assert!(matches!(err, Error::Unsupported(_)) && err.to_string().contains("Windows"), "{err}");
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A run that dies without stopping its guests leaves QEMU running; the next
+/// run over the same directory stops it and removes its files.
+#[tokio::test]
+async fn a_later_run_stops_guests_an_earlier_run_left_behind() {
+    let root = std::env::temp_dir().join(format!("pvq-{}", uuid::Uuid::new_v4().simple()));
+    let Some(hv) = real_qemu(&root) else { return };
+    let blank = images::path(&hv.cfg.images_dir, "blank");
+    hv.qemu_img(&["create".as_ref(), "-f".as_ref(), "qcow2".as_ref(), blank.as_os_str(), "64M".as_ref()])
+        .await
+        .expect("blank image");
+    let spec =
+        VmSpec { vcpus: 1, mem_mib: 128, disk_gib: 1, image: "blank".into(), accelerator: None, confidential: false };
+    let placement = Placement { pinned_cores: vec![0], mem_mib: 128, disk_gib: 1, accelerator: None };
+    let id = VmId::new();
+    hv.create(id, &spec, &placement).await.expect("create");
+    let dir = hv.vm_dir(id);
+    let qmp = hv.with_vm(id, |vm| vm.qmp.clone()).await.expect("vm");
+    assert_eq!(hv.reap_orphans().await.expect("reap"), 0, "a node never reaps its own guests");
+
+    // Die the way a killed process does: QEMU keeps running, nothing cleans up.
+    let vm = hv.vms.lock().await.remove(&id).expect("vm");
+    std::mem::forget(vm);
+    let cfg = hv.cfg.clone();
+    drop(hv);
+
+    let next = QemuHypervisor::new(cfg).expect("next run");
+    assert_eq!(next.reap_orphans().await.expect("reap"), 1);
+    assert!(!dir.exists(), "leftover files removed");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while qmp.execute("query-status", None).await.is_ok() {
+        assert!(tokio::time::Instant::now() < deadline, "orphaned QEMU still answers");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // A second node sharing the directory leaves the first one's guests alone.
+    let shared = QemuHypervisor::new(next.cfg.clone()).expect("second node");
+    assert!(shared.run_lock.is_none());
+    let _ = std::fs::remove_dir_all(root);
+}

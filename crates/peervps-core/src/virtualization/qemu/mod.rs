@@ -29,7 +29,7 @@ pub mod qmp;
 pub mod seed;
 pub mod unattend;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -57,6 +57,8 @@ use qmp::Qmp;
 
 const SNAPSHOT_MAGIC: &[u8; 8] = b"PVQMSNP1";
 const DEFAULT_USER: &str = "peervps";
+/// Each VM directory records its QMP port here while its QEMU runs.
+const QMP_PORT_FILE: &str = "qmp.port";
 /// Minimums for a Windows guest (Windows 11 needs 4 GiB; Setup alone fills ~20 GiB).
 const WINDOWS_MIN_MEM_MIB: u64 = 4096;
 const WINDOWS_MIN_DISK_GIB: u64 = 32;
@@ -300,6 +302,9 @@ impl Drop for SerialInput {
 pub struct QemuHypervisor {
     cfg: QemuConfig,
     vms: Mutex<HashMap<VmId, Vm>>,
+    /// Held while this process is the only node using `run_dir`; only then are
+    /// directories it did not create safe to treat as leftovers.
+    run_lock: Option<std::fs::File>,
 }
 
 impl fmt::Debug for QemuHypervisor {
@@ -317,7 +322,9 @@ impl QemuHypervisor {
         }
         std::fs::create_dir_all(&cfg.images_dir)?;
         std::fs::create_dir_all(&cfg.run_dir)?;
-        Ok(Self { cfg, vms: Mutex::new(HashMap::new()) })
+        let lock = std::fs::File::create(cfg.run_dir.join(".lock"))?;
+        let run_lock = lock.try_lock().is_ok().then_some(lock);
+        Ok(Self { cfg, vms: Mutex::new(HashMap::new()), run_lock })
     }
 
     pub fn config(&self) -> &QemuConfig {
@@ -359,6 +366,8 @@ impl QemuHypervisor {
             kill(&mut vm).await;
             return Err(e);
         }
+        // Lets a later run find and stop this QEMU if this process dies without stopping it.
+        std::fs::write(dir.join(QMP_PORT_FILE), qmp_port.to_string())?;
         if launch.installer.is_some() {
             let password = Installer::vnc_password(&launch.password);
             if let Err(e) =
@@ -691,6 +700,35 @@ impl Hypervisor for QemuHypervisor {
         let log = tokio::fs::read(dir.join("console.log")).await.unwrap_or_default();
         let start = log.len().saturating_sub(max_bytes);
         Ok(Some(String::from_utf8_lossy(&log[start..]).into_owned()))
+    }
+
+    /// Guests are not persisted across runs, so a VM directory this process did
+    /// not create belongs to a run that died: quit its QEMU (if one still answers
+    /// on the recorded QMP port) and delete the directory.
+    async fn reap_orphans(&self) -> Result<usize> {
+        if self.run_lock.is_none() {
+            tracing::warn!(dir = %self.cfg.run_dir.display(), "another node uses this run directory; not reaping");
+            return Ok(0);
+        }
+        let known: HashSet<PathBuf> = self.vms.lock().await.values().map(|vm| vm.dir.clone()).collect();
+        let Ok(entries) = std::fs::read_dir(&self.cfg.run_dir) else { return Ok(0) };
+        let mut reaped = 0;
+        for dir in entries.flatten().map(|e| e.path()).filter(|d| d.is_dir() && !known.contains(d)) {
+            let port = std::fs::read_to_string(dir.join(QMP_PORT_FILE)).ok().and_then(|p| p.trim().parse::<u16>().ok());
+            if let Some(port) = port {
+                // QMP answers only for a QEMU we started, never for whatever else took the port.
+                let qmp = Qmp::new(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+                if qmp.execute("query-status", None).await.is_ok() {
+                    let _ = qmp.execute("quit", None).await;
+                    reaped += 1;
+                    tracing::warn!(dir = %dir.display(), "stopped a guest left running by an earlier run");
+                }
+            }
+            if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
+                tracing::warn!(dir = %dir.display(), error = %e, "could not remove a stale VM directory");
+            }
+        }
+        Ok(reaped)
     }
 
     async fn console_write(&self, id: VmId, data: &[u8]) -> Result<()> {

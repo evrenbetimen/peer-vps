@@ -461,6 +461,19 @@ impl Node {
         Ok(updated)
     }
 
+    /// Terminate every instance before the node exits. Instances live in memory
+    /// only, so a guest left running would be unreachable by the next run and,
+    /// on a peer, billed with no one to stop it.
+    pub async fn shutdown(&self) {
+        let live: Vec<Instance> =
+            self.instances.lock().await.values().filter(|i| i.state != InstanceState::Terminated).cloned().collect();
+        for inst in live {
+            if let Err(e) = self.terminate(&inst.renter, &inst.id).await {
+                tracing::warn!(id = %inst.id, error = %e, "could not terminate on shutdown");
+            }
+        }
+    }
+
     pub async fn terminate(&self, renter: &str, id: &str) -> Result<Instance> {
         let inst = self.instance(renter, id).await?;
         if let Some((peers, host)) = self.remote(&inst)? {
