@@ -144,59 +144,6 @@ fn windows_installs_get_in_box_devices_a_screen_and_answers() {
 }
 
 #[test]
-fn only_our_own_qemus_count_as_orphans() {
-    let none = Extra { seed_url: None, incoming: false, serial_port: None };
-    let ours = cfg(Path::new("/data/peervps"));
-    let args = command_line(&ours, &ours.run_dir.join("vm-1"), &launch(), 4444, &none);
-    let qemu = std::ffi::OsStr::new("qemu-system-x86_64");
-    assert!(is_orphan(qemu, &args, &ours.run_dir));
-    // Another install's VM, or another program reading our files, is left alone.
-    let other = cfg(Path::new("/elsewhere"));
-    assert!(!is_orphan(
-        qemu,
-        &command_line(&other, &other.run_dir.join("vm-1"), &launch(), 4444, &none),
-        &ours.run_dir
-    ));
-    assert!(!is_orphan(std::ffi::OsStr::new("tail"), &args, &ours.run_dir));
-}
-
-/// A stand-in "QEMU" (a shell renamed so the OS reports it as qemu-system)
-/// whose command line names a VM directory, as a crashed app would leave it.
-/// Linux only: macOS's /bin/sh is a launcher that re-execs bash, so the copy
-/// does not keep the qemu-system name there.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_fresh_start_stops_qemus_left_in_its_run_dir() {
-    let root = std::env::temp_dir().join(format!("pvqo-{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&root).expect("tmp");
-    let fake = root.join("qemu-system-x86_64");
-    std::fs::copy("/bin/sh", &fake).expect("copy sh");
-    let run_dir = root.join("run");
-    let spawn = |dir: &Path| {
-        std::process::Command::new(&fake)
-            .args(["-c", "sleep 60; true"])
-            .arg(dir.join("vm-1").join("console.log"))
-            .spawn()
-            .expect("spawn")
-    };
-    let mut ours = spawn(&run_dir);
-    let mut other = spawn(&root.join("elsewhere"));
-    std::thread::sleep(Duration::from_millis(200));
-
-    reap_orphans(&run_dir);
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while ours.try_wait().expect("wait").is_none() && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(ours.try_wait().expect("wait").is_some(), "our leftover QEMU was stopped");
-    assert!(other.try_wait().expect("wait").is_none(), "another install's QEMU keeps running");
-    let _ = other.kill();
-    let _ = other.wait();
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
 fn snapshot_framing_round_trips_and_rejects_garbage() {
     let packed = pack_snapshot(&launch(), b"state", b"disk-bytes").expect("pack");
     let (l, state, disk) = unpack_snapshot(&packed).expect("unpack");
@@ -364,5 +311,45 @@ async fn windows_iso_install_boots_with_a_locked_screen() {
     let wrong = VmSpec { image: "win-other".into(), ..spec };
     let err = hv.create(VmId::new(), &wrong, &placement).await.expect_err("wrong arch");
     assert!(matches!(err, Error::Unsupported(_)) && err.to_string().contains("Windows"), "{err}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A run that dies without stopping its guests leaves QEMU running; the next
+/// run over the same directory stops it and removes its files.
+#[tokio::test]
+async fn a_later_run_stops_guests_an_earlier_run_left_behind() {
+    let root = std::env::temp_dir().join(format!("pvq-{}", uuid::Uuid::new_v4().simple()));
+    let Some(hv) = real_qemu(&root) else { return };
+    let blank = images::path(&hv.cfg.images_dir, "blank");
+    hv.qemu_img(&["create".as_ref(), "-f".as_ref(), "qcow2".as_ref(), blank.as_os_str(), "64M".as_ref()])
+        .await
+        .expect("blank image");
+    let spec =
+        VmSpec { vcpus: 1, mem_mib: 128, disk_gib: 1, image: "blank".into(), accelerator: None, confidential: false };
+    let placement = Placement { pinned_cores: vec![0], mem_mib: 128, disk_gib: 1, accelerator: None };
+    let id = VmId::new();
+    hv.create(id, &spec, &placement).await.expect("create");
+    let dir = hv.vm_dir(id);
+    let qmp = hv.with_vm(id, |vm| vm.qmp.clone()).await.expect("vm");
+    assert_eq!(hv.reap_orphans().await.expect("reap"), 0, "a node never reaps its own guests");
+
+    // Die the way a killed process does: QEMU keeps running, nothing cleans up.
+    let vm = hv.vms.lock().await.remove(&id).expect("vm");
+    std::mem::forget(vm);
+    let cfg = hv.cfg.clone();
+    drop(hv);
+
+    let next = QemuHypervisor::new(cfg).expect("next run");
+    assert_eq!(next.reap_orphans().await.expect("reap"), 1);
+    assert!(!dir.exists(), "leftover files removed");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while qmp.execute("query-status", None).await.is_ok() {
+        assert!(tokio::time::Instant::now() < deadline, "orphaned QEMU still answers");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // A second node sharing the directory leaves the first one's guests alone.
+    let shared = QemuHypervisor::new(next.cfg.clone()).expect("second node");
+    assert!(shared.run_lock.is_none());
     let _ = std::fs::remove_dir_all(root);
 }

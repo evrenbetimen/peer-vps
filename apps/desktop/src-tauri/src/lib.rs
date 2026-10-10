@@ -82,6 +82,11 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             let store = Store::open(data_dir.join("node.db"))?;
             let (hypervisor, hypervisor_note) = pick_hypervisor(&data_dir);
+            match tauri::async_runtime::block_on(hypervisor.reap_orphans()) {
+                Ok(0) => {}
+                Ok(n) => tracing::warn!(n, "stopped guests an earlier run left behind"),
+                Err(e) => tracing::warn!(error = %e, "could not look for leftover guests"),
+            }
             let (node, _key) = tauri::async_runtime::block_on(Node::demo_with_hypervisor(store, hypervisor))?;
             let provider = node.config.node_id.clone();
             node.store.with(|c| presence::record(c, &provider, PresenceEvent::Online, now_secs()))?;
@@ -158,12 +163,18 @@ pub fn run() {
             std::process::exit(1);
         })
         .run(|app, event| {
-            // The process exits right after this without running destructors,
-            // so stop the VMs (and their billing) now or they outlive the app.
+            // Stop every guest on quit; QEMU runs as a separate process and would outlive the app.
             if let tauri::RunEvent::Exit = event
                 && let Some(state) = app.try_state::<AppState>()
             {
-                tauri::async_runtime::block_on(state.node.shutdown(std::time::Duration::from_secs(5)));
+                let node = state.node.clone();
+                // The timer must be created inside the runtime, hence the async block.
+                let stopped = tauri::async_runtime::block_on(async move {
+                    tokio::time::timeout(std::time::Duration::from_secs(20), node.shutdown()).await
+                });
+                if stopped.is_err() {
+                    tracing::warn!("guests did not all stop within 20 s");
+                }
             }
         });
 }

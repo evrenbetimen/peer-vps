@@ -158,6 +158,11 @@ pub trait Hypervisor: Send + Sync + fmt::Debug {
     async fn console_write(&self, _id: VmId, _data: &[u8]) -> Result<()> {
         Err(Error::Unsupported(format!("{} has a read-only console", self.name())))
     }
+    /// Stop guests a previous run of this node left behind (it crashed or was
+    /// killed before it could stop them); returns how many were found.
+    async fn reap_orphans(&self) -> Result<usize> {
+        Ok(0)
+    }
     /// SSH endpoint for the guest, if the backend wires one up.
     async fn access(&self, _id: VmId) -> Result<Option<GuestAccess>> {
         Ok(None)

@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
@@ -326,34 +325,6 @@ impl Node {
         Ok(())
     }
 
-    /// Stop everything before the process exits: terminate every live
-    /// instance (local ones stop billing and their VM; rentals on peers are
-    /// ended there and refunded), then destroy any VM still left. Each step
-    /// gets `per_step` so an unreachable peer cannot hold up the exit.
-    ///
-    /// Instances live only in memory, so anything left running would be
-    /// orphaned: unreachable from the next start, and billed until its
-    /// prepaid credit ran out.
-    pub async fn shutdown(&self, per_step: Duration) {
-        let live: Vec<Instance> =
-            self.instances.lock().await.values().filter(|i| i.state != InstanceState::Terminated).cloned().collect();
-        for inst in live {
-            match tokio::time::timeout(per_step, self.terminate(&inst.renter, &inst.id)).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => tracing::warn!(id = %inst.id, error = %e, "could not terminate on shutdown"),
-                Err(_) => tracing::warn!(id = %inst.id, "terminating on shutdown timed out"),
-            }
-        }
-        for vm in self.provisioner.list().await {
-            if let Err(e) = tokio::time::timeout(per_step, self.provisioner.destroy(vm.id))
-                .await
-                .unwrap_or_else(|_| Err(Error::Hypervisor("timed out".into())))
-            {
-                tracing::warn!(vm = %vm.id, error = %e, "could not stop a VM on shutdown");
-            }
-        }
-    }
-
     /// Store the host's view of a remote instance under our renter and offer id.
     async fn keep_remote(&self, ours: &Instance, theirs: Instance) -> Instance {
         let inst = Instance {
@@ -490,6 +461,19 @@ impl Node {
         Ok(updated)
     }
 
+    /// Terminate every instance before the node exits. Instances live in memory
+    /// only, so a guest left running would be unreachable by the next run and,
+    /// on a peer, billed with no one to stop it.
+    pub async fn shutdown(&self) {
+        let live: Vec<Instance> =
+            self.instances.lock().await.values().filter(|i| i.state != InstanceState::Terminated).cloned().collect();
+        for inst in live {
+            if let Err(e) = self.terminate(&inst.renter, &inst.id).await {
+                tracing::warn!(id = %inst.id, error = %e, "could not terminate on shutdown");
+            }
+        }
+    }
+
     pub async fn terminate(&self, renter: &str, id: &str) -> Result<Instance> {
         let inst = self.instance(renter, id).await?;
         if let Some((peers, host)) = self.remote(&inst)? {
@@ -611,7 +595,7 @@ mod tests {
         let parked = node.deploy(&renter, DeployRequest { offer_id: "fra-cpu-1".into(), spec }).await.expect("b");
         node.scale(&renter, &parked.id, 0).await.expect("to zero");
 
-        node.shutdown(Duration::from_secs(5)).await;
+        node.shutdown().await;
 
         for id in [&running.id, &parked.id] {
             assert_eq!(node.instance(&renter, id).await.expect("kept").state, InstanceState::Terminated);
