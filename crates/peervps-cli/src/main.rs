@@ -434,8 +434,11 @@ async fn serve(listen: SocketAddr, db: Option<PathBuf>, hv: HypervisorArgs, peer
         }
     });
     tokio::select! {
-        r = peervps_core::api::serve(node, listen) => r?,
-        _ = tokio::signal::ctrl_c() => eprintln!("shutting down"),
+        r = peervps_core::api::serve(node.clone(), listen) => r?,
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("shutting down: stopping VMs");
+            node.shutdown(std::time::Duration::from_secs(5)).await;
+        }
     }
     Ok(())
 }
