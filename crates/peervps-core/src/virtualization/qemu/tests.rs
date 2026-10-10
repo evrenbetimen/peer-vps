@@ -162,7 +162,9 @@ fn only_our_own_qemus_count_as_orphans() {
 
 /// A stand-in "QEMU" (a shell renamed so the OS reports it as qemu-system)
 /// whose command line names a VM directory, as a crashed app would leave it.
-#[cfg(unix)]
+/// Linux only: macOS's /bin/sh is a launcher that re-execs bash, so the copy
+/// does not keep the qemu-system name there.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_fresh_start_stops_qemus_left_in_its_run_dir() {
     let root = std::env::temp_dir().join(format!("pvqo-{}", uuid::Uuid::new_v4().simple()));
