@@ -28,7 +28,6 @@ socket2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-sysinfo.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 zstd.workspace = true

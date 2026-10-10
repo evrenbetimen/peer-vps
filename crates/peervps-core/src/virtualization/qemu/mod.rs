@@ -923,32 +923,6 @@ async fn kill(vm: &mut Vm) {
     let _ = tokio::time::timeout(Duration::from_secs(5), vm.child.wait()).await;
 }
 
-/// Kill QEMU processes a previous run left behind (it crashed or was killed
-/// before it could stop them): nothing can reach them any more, and they
-/// would keep holding the host's cores and memory.
-fn reap_orphans(run_dir: &Path) {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
-    );
-    for (pid, p) in sys.processes() {
-        if is_orphan(p.name(), p.cmd(), run_dir) {
-            tracing::warn!(%pid, "stopping a QEMU left running by an earlier start");
-            p.kill();
-        }
-    }
-}
-
-/// A QEMU whose command line points into our run directory.
-fn is_orphan(name: &std::ffi::OsStr, cmd: &[OsString], run_dir: &Path) -> bool {
-    let run_dir = run_dir.display().to_string();
-    name.to_string_lossy().to_ascii_lowercase().contains("qemu-system")
-        && cmd.iter().any(|a| a.to_string_lossy().contains(&run_dir))
-}
-
 /// A loopback port free right now (QEMU binds it a moment later).
 fn free_port() -> Result<u16> {
     Ok(TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?.local_addr()?.port())
