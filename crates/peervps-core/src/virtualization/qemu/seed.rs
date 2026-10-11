@@ -21,7 +21,6 @@ pub const HOST_FROM_GUEST: &str = "10.0.2.2";
 pub struct Seed {
     pub instance_id: String,
     pub hostname: String,
-    pub user: String,
     pub password: String,
     pub ssh_keys: Vec<String>,
 }
@@ -34,24 +33,21 @@ impl Seed {
     pub fn user_data(&self) -> String {
         // JSON strings are valid YAML scalars, which sidesteps quoting rules for keys.
         let q = |s: &str| serde_json::Value::String(s.to_owned()).to_string();
-        let keys: Vec<String> = self.ssh_keys.iter().map(|k| q(k)).collect();
-        // Like a classic VPS, `root` signs in directly with the same password
-        // and keys; `user` stays as a sudoer for those who prefer it.
-        let root_keys = q(&self.ssh_keys.iter().map(|k| format!("{k}\n")).collect::<String>());
+        let keys = q(&self.ssh_keys.iter().map(|k| format!("{k}\n")).collect::<String>());
+        // Like a classic VPS, the renter signs in as root with the generated
+        // password or their keys; `users: []` skips the image's default user.
         format!(
             "#cloud-config\n\
-             users:\n  - name: {user}\n    groups: [sudo]\n    shell: /bin/bash\n    sudo: \"ALL=(ALL) NOPASSWD:ALL\"\n    lock_passwd: false\n    ssh_authorized_keys: [{keys}]\n\
+             users: []\n\
              disable_root: false\n\
-             chpasswd:\n  expire: false\n  users:\n    - {{name: {user}, password: {pw}, type: text}}\n    - {{name: root, password: {pw}, type: text}}\n\
+             chpasswd:\n  expire: false\n  users:\n    - {{name: root, password: {pw}, type: text}}\n\
              ssh_pwauth: true\n\
              write_files:\n\
              \x20 - {{path: /etc/ssh/sshd_config.d/10-peervps-root.conf, content: \"PermitRootLogin yes\\n\"}}\n\
-             \x20 - {{path: /root/.ssh/authorized_keys, permissions: \"0600\", content: {root_keys}}}\n\
+             \x20 - {{path: /root/.ssh/authorized_keys, permissions: \"0600\", content: {keys}}}\n\
              runcmd:\n  - [sh, -c, \"systemctl restart ssh || systemctl restart sshd || true\"]\n\
              growpart: {{mode: auto, devices: [\"/\"]}}\n",
-            user = q(&self.user),
             pw = q(&self.password),
-            keys = keys.join(", "),
         )
     }
 }
@@ -79,7 +75,6 @@ mod tests {
         Seed {
             instance_id: "vm-1".into(),
             hostname: "pv-1".into(),
-            user: "peervps".into(),
             password: "s3cret".into(),
             ssh_keys: vec!["ssh-ed25519 AAAA test@host".into()],
         }
@@ -89,10 +84,9 @@ mod tests {
     fn user_data_is_cloud_config() {
         let ud = seed().user_data();
         assert!(ud.starts_with("#cloud-config\n"));
-        assert!(ud.contains("name: \"peervps\""));
-        assert!(ud.contains("ssh_authorized_keys: [\"ssh-ed25519 AAAA test@host\"]"));
-        assert!(ud.contains("password: \"s3cret\""));
-        // Root signs in directly, over SSH too, with the same password and key.
+        // Only root, with the generated password and the renter's key.
+        assert!(ud.contains("users: []"));
+        assert!(!ud.contains("peervps\""));
         assert!(ud.contains("{name: root, password: \"s3cret\", type: text}"));
         assert!(ud.contains("disable_root: false"));
         assert!(ud.contains("PermitRootLogin yes"));

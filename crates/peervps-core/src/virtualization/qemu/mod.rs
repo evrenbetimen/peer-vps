@@ -162,9 +162,9 @@ pub struct QemuConfig {
     pub images_dir: PathBuf,
     /// Per-VM disks, logs and snapshots live in `<run_dir>/<vm>/`.
     pub run_dir: PathBuf,
-    /// Login user created in every guest.
+    /// Windows guests' login user (Linux cloud images sign in as root).
     pub user: String,
-    /// Public keys authorized for `user`.
+    /// Public keys authorized for root on Linux cloud images.
     pub ssh_keys: Vec<String>,
 }
 
@@ -555,7 +555,6 @@ impl Hypervisor for QemuHypervisor {
             let (url, seed) = seed::serve(seed::Seed {
                 instance_id: id.to_string(),
                 hostname: hostname.clone(),
-                user: self.cfg.user.clone(),
                 password: launch.password.clone(),
                 ssh_keys: self.cfg.ssh_keys.clone(),
             })

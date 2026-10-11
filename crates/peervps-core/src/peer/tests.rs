@@ -67,7 +67,7 @@ impl Hypervisor for EchoGuests {
         Ok(Some(GuestAccess {
             ssh_host: "127.0.0.1".into(),
             ssh_port: self.port,
-            user: "peervps".into(),
+            user: "root".into(),
             password: Some("secret".into()),
             windows: false,
             rdp: None,
