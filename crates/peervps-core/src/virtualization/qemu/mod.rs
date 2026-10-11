@@ -57,6 +57,8 @@ use qmp::Qmp;
 
 const SNAPSHOT_MAGIC: &[u8; 8] = b"PVQMSNP1";
 const DEFAULT_USER: &str = "peervps";
+/// Cloud-image guests are logged into as root, like a rented VPS.
+const LINUX_USER: &str = "root";
 /// Each VM directory records its QMP port here while its QEMU runs.
 const QMP_PORT_FILE: &str = "qmp.port";
 /// Minimums for a Windows guest (Windows 11 needs 4 GiB; Setup alone fills ~20 GiB).
@@ -162,9 +164,9 @@ pub struct QemuConfig {
     pub images_dir: PathBuf,
     /// Per-VM disks, logs and snapshots live in `<run_dir>/<vm>/`.
     pub run_dir: PathBuf,
-    /// Login user created in every guest.
+    /// Administrator account created in Windows guests (Linux ones use root).
     pub user: String,
-    /// Public keys authorized for `user`.
+    /// Public keys authorized for root in Linux guests.
     pub ssh_keys: Vec<String>,
 }
 
@@ -555,7 +557,6 @@ impl Hypervisor for QemuHypervisor {
             let (url, seed) = seed::serve(seed::Seed {
                 instance_id: id.to_string(),
                 hostname: hostname.clone(),
-                user: self.cfg.user.clone(),
                 password: launch.password.clone(),
                 ssh_keys: self.cfg.ssh_keys.clone(),
             })
@@ -741,10 +742,15 @@ impl Hypervisor for QemuHypervisor {
         let installer = launch.installer.as_ref();
         // A Linux installer asks for its own user; cloud images and Windows get ours.
         let ours = installer.is_none_or(|i| i.windows);
+        let user = match installer {
+            None => LINUX_USER.to_owned(),
+            Some(i) if i.windows => self.cfg.user.clone(),
+            Some(_) => String::new(),
+        };
         Ok(Some(GuestAccess {
             ssh_host: "127.0.0.1".into(),
             ssh_port: launch.ssh_port,
-            user: if ours { self.cfg.user.clone() } else { String::new() },
+            user,
             password: ours.then(|| launch.password.clone()),
             windows: installer.is_some_and(|i| i.windows),
             rdp: installer.and_then(|i| i.rdp_port).map(|p| format!("127.0.0.1:{p}")),

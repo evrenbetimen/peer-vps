@@ -199,7 +199,7 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         if (image?.iso?.windows) {
           return { sshHost: "127.0.0.1", sshPort: port, user: "peervps", password: "mock-password", windows: true, rdp: `127.0.0.1:${port + 1000}`, display: "vnc://127.0.0.1:5900", displayPassword: "mock-pas" };
         }
-        return { sshHost: "127.0.0.1", sshPort: port, user: "peervps", password: "mock-password" };
+        return { sshHost: "127.0.0.1", sshPort: port, user: "root", password: "mock-password" };
       }
       case "open_guest_screen":
         return null;

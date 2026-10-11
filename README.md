@@ -67,22 +67,23 @@ from the Actions tab with that tag.
 The QEMU backend runs real virtual machines on the machine PeerVPS runs on, with the OS's own
 hypervisor: KVM on Linux, Hypervisor.framework on macOS, the Windows Hypervisor Platform on Windows
 (falls back to software emulation when none is available). Guests boot stock cloud images from a
-copy-on-write overlay, get a login user, password and your SSH keys through cloud-init, and are
-reachable with `ssh -p <port> peervps@127.0.0.1`. No root, bridge or tap device is needed.
+copy-on-write overlay, get a root password and your SSH keys through cloud-init, and are
+reachable with `ssh -p <port> root@127.0.0.1`, like a rented VPS. The host needs no root, bridge or tap
+device.
 
 1. Install QEMU: `brew install qemu` · `sudo apt install qemu-system qemu-utils` ·
    `winget install SoftwareFreedomConservancy.QEMU` (Windows also needs the "Windows Hypervisor Platform"
    feature turned on in *Turn Windows features on or off*).
 2. **Desktop app:** PeerVPS finds QEMU by itself. Download an image under Host → Guest images, then
    deploy from Console against "this-machine". The instance shows its SSH command and password, and the
-   terminal is the guest's live serial console: click it and log in with that user and password.
+   terminal is the guest's live serial console: click it and log in as `root` with that password.
 3. **Headless / agents:**
 
 ```bash
 peervps image pull ubuntu-24.04                  # also ubuntu-22.04, debian-13; checksum-verified
 peervps serve --hypervisor qemu --ssh-key ~/.ssh/id_ed25519.pub
 peervps deploy fra-cpu-1 --vcpus 2 --mem-mib 2048 --disk-gib 20 --image ubuntu-24.04
-peervps access <instance-id>                     # {"command": "ssh -p 40123 peervps@127.0.0.1", "access": {...}}
+peervps access <instance-id>                     # {"command": "ssh -p 40123 root@127.0.0.1", "access": {...}}
 ```
 
 Images live in `~/.local/share/peervps/images`, `~/Library/Application Support/PeerVPS/images` or
