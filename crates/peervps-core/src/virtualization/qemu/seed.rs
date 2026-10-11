@@ -35,11 +35,19 @@ impl Seed {
         // JSON strings are valid YAML scalars, which sidesteps quoting rules for keys.
         let q = |s: &str| serde_json::Value::String(s.to_owned()).to_string();
         let keys: Vec<String> = self.ssh_keys.iter().map(|k| q(k)).collect();
+        // Like a classic VPS, `root` signs in directly with the same password
+        // and keys; `user` stays as a sudoer for those who prefer it.
+        let root_keys = q(&self.ssh_keys.iter().map(|k| format!("{k}\n")).collect::<String>());
         format!(
             "#cloud-config\n\
              users:\n  - name: {user}\n    groups: [sudo]\n    shell: /bin/bash\n    sudo: \"ALL=(ALL) NOPASSWD:ALL\"\n    lock_passwd: false\n    ssh_authorized_keys: [{keys}]\n\
-             chpasswd:\n  expire: false\n  users:\n    - {{name: {user}, password: {pw}, type: text}}\n\
+             disable_root: false\n\
+             chpasswd:\n  expire: false\n  users:\n    - {{name: {user}, password: {pw}, type: text}}\n    - {{name: root, password: {pw}, type: text}}\n\
              ssh_pwauth: true\n\
+             write_files:\n\
+             \x20 - {{path: /etc/ssh/sshd_config.d/10-peervps-root.conf, content: \"PermitRootLogin yes\\n\"}}\n\
+             \x20 - {{path: /root/.ssh/authorized_keys, permissions: \"0600\", content: {root_keys}}}\n\
+             runcmd:\n  - [sh, -c, \"systemctl restart ssh || systemctl restart sshd || true\"]\n\
              growpart: {{mode: auto, devices: [\"/\"]}}\n",
             user = q(&self.user),
             pw = q(&self.password),
@@ -84,6 +92,11 @@ mod tests {
         assert!(ud.contains("name: \"peervps\""));
         assert!(ud.contains("ssh_authorized_keys: [\"ssh-ed25519 AAAA test@host\"]"));
         assert!(ud.contains("password: \"s3cret\""));
+        // Root signs in directly, over SSH too, with the same password and key.
+        assert!(ud.contains("{name: root, password: \"s3cret\", type: text}"));
+        assert!(ud.contains("disable_root: false"));
+        assert!(ud.contains("PermitRootLogin yes"));
+        assert!(ud.contains("content: \"ssh-ed25519 AAAA test@host\\n\"}"));
         assert!(seed().meta_data().contains("instance-id: vm-1"));
     }
 

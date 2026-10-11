@@ -741,10 +741,16 @@ impl Hypervisor for QemuHypervisor {
         let installer = launch.installer.as_ref();
         // A Linux installer asks for its own user; cloud images and Windows get ours.
         let ours = installer.is_none_or(|i| i.windows);
+        // Cloud images sign in as root, like a classic VPS (see `seed`).
+        let user = match installer {
+            None => "root".to_owned(),
+            Some(i) if i.windows => self.cfg.user.clone(),
+            Some(_) => String::new(),
+        };
         Ok(Some(GuestAccess {
             ssh_host: "127.0.0.1".into(),
             ssh_port: launch.ssh_port,
-            user: if ours { self.cfg.user.clone() } else { String::new() },
+            user,
             password: ours.then(|| launch.password.clone()),
             windows: installer.is_some_and(|i| i.windows),
             rdp: installer.and_then(|i| i.rdp_port).map(|p| format!("127.0.0.1:{p}")),

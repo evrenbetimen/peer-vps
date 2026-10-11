@@ -300,7 +300,7 @@ function AccessLine({ instance }: { instance: Instance }) {
         {cmd}
       </button>
       {copied && <span className="text-emerald-400">copied</span>}
-      {access.windows && access.user && (
+      {access.user && (
         <span className="text-slate-400">
           user <span className="font-mono text-slate-200">{access.user}</span>
         </span>
