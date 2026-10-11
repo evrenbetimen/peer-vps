@@ -131,7 +131,7 @@ test("a deployed instance shows how to SSH in", async ({ page }) => {
   await nav(page, "Console").click();
   await expect(page.getByText(/^3 · Offers · [1-9]/)).toBeVisible();
   await page.getByRole("button", { name: "Deploy" }).click();
-  await expect(page.getByRole("button", { name: /^ssh -p \d+ peervps@127\.0\.0\.1$/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^ssh -p \d+ root@127\.0\.0\.1$/ })).toBeVisible();
   await expect(page.getByText("mock-password")).toBeVisible();
 });
 
