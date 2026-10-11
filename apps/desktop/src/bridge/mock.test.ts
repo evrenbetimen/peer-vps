@@ -108,7 +108,7 @@ describe("browser mock bridge", () => {
     const m = await freshMock();
     const inst = await call<Instance>(m, "deploy_instance", { request: { offerId: "fra-cpu-1", spec } });
     const access = await call<{ sshPort: number; user: string } | null>(m, "get_instance_access", { id: inst.id });
-    expect(access).toMatchObject({ user: "peervps" });
+    expect(access).toMatchObject({ user: "root" });
     await call(m, "terminate_instance", { id: inst.id });
     expect(await call(m, "get_instance_access", { id: inst.id })).toBeNull();
   });

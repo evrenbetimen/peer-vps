@@ -39,7 +39,7 @@ describe("App", () => {
 
     expect(await screen.findByTestId("terminal")).toHaveTextContent(/shell 10\.147\.0\.\d+/);
     expect(await screen.findByText(/1 active/)).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: /^ssh -p \d+ peervps@127\.0\.0\.1$/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /^ssh -p \d+ root@127\.0\.0\.1$/ })).toBeInTheDocument();
     expect(screen.getByText("mock-password")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Scale to 0" }));
     expect(await screen.findByText("scaledToZero")).toBeInTheDocument();

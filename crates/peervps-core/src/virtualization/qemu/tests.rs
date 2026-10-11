@@ -200,7 +200,7 @@ async fn lifecycle_against_real_qemu() {
     hv.start(id).await.expect("start");
     assert_eq!(status(hv.qmp(id, "query-status", None).await.expect("status")), "running");
     let access = hv.access(id).await.expect("access").expect("ssh");
-    assert_eq!(access.user, "peervps");
+    assert_eq!(access.user, "root", "cloud images sign in as root, like a classic VPS");
     assert!(access.ssh_command().starts_with("ssh -p "));
     let disk = hv
         .qemu_img(&[
